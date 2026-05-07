@@ -44,6 +44,10 @@
 			"types": "./dist/client/index.d.mts",
 			"default": "./dist/client/index.mjs"
 		},
+		"./browser": {
+			"types": "./dist/browser/index.d.mts",
+			"default": "./dist/browser/index.mjs"
+		},
 		"./helper": {
 			"types": "./dist/helper/index.d.mts",
 			"default": "./dist/helper/index.mjs"
@@ -68,6 +72,7 @@
 		"@atcute/client": "^4.2.1",
 		"@atcute/identity-resolver": "^1.2.2",
 		"@atcute/lexicons": "^1.2.9",
+		"@atcute/oauth-browser-client": "^3.0.0",
 		"@atcute/oauth-node-client": "^1.1.0",
 		"@atcute/tid": "^1.1.2"
 	},

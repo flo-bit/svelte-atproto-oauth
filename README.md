@@ -74,11 +74,12 @@ Per request, `event.locals.{ did, session, client }` is populated for any signed
 
 | Subpath | What it ships |
 |---|---|
-| `/server` | `createAtprotoAuth`, types |
+| `/server` | `createAtprotoAuth`, types — server (confidential / loopback) flow |
 | `/server/stores/memory` | `memory()` |
 | `/server/stores/cloudflare` | `cloudflareKV(bindingName \| namespace, opts?)` |
 | `/server/stores/upstash` | `upstashRedis({ url, token })` |
-| `/client` | `login(handle)`, `signup()`, `logout()` — imperative client helpers |
+| `/client` | `login(handle)`, `signup()`, `logout()` — imperative client helpers for the **server** flow |
+| `/browser` | `createAtprotoBrowserAuth` — full **browser-only** flow for static-site deploys (GH Pages, etc.) |
 | `/helper` | atproto utilities (handle/PDS resolution, listRecords, getRecord, …) |
 | `/bsky` | bsky-specific (`loadBskyProfile`, `loadBskyProfiles`, CDN URL, …) |
 
@@ -139,6 +140,60 @@ loadHandle(did, { slingshot: false });             // skip slingshot, use PLC + 
 loadHandle(did, { slingshot: 'https://my.host' }); // self-hosted slingshot
 recentRecords('xyz.statusphere.status', { ufo: 'https://my.host' });
 ```
+
+## Browser-only flow (`/browser`)
+
+For static-site deployments (no server runtime — GitHub Pages, Cloudflare Pages without functions, S3, etc.). Tokens live in browser `localStorage`, the DPoP key in IndexedDB. The only thing that needs to be served is a prerendered `oauth-client-metadata.json`.
+
+```ts
+// src/lib/atproto.ts
+import { createAtprotoBrowserAuth } from '@svelte-atproto/oauth/browser';
+
+export const atproto = createAtprotoBrowserAuth({
+	origin: 'https://my-app.example',
+	scope: 'atproto',
+	signupPDS: 'https://pds.rip/' // optional
+});
+```
+
+```ts
+// src/routes/oauth-client-metadata.json/+server.ts
+import { atproto } from '$lib/atproto';
+import { json } from '@sveltejs/kit';
+export const prerender = true;
+export const GET = () => json(atproto.metadata);
+```
+
+```svelte
+<!-- src/routes/+layout.svelte -->
+<script>
+	import { onMount } from 'svelte';
+	import { atproto } from '$lib/atproto';
+	onMount(() => atproto.init());
+</script>
+```
+
+In components:
+
+```svelte
+<script>
+	import { atproto } from '$lib/atproto';
+	const { user, login, logout } = atproto;
+</script>
+
+{#if $user.isInitializing}
+	loading…
+{:else if $user.isLoggedIn}
+	signed in as {$user.did}
+	<button onclick={logout}>Sign out</button>
+{:else}
+	<button onclick={() => login('alice.bsky.social')}>Sign in</button>
+{/if}
+```
+
+In dev, the lib uses a loopback `client_id` automatically — no public URL or metadata route needed for local testing.
+
+`atproto.user` is a `svelte/store` `Readable` so components consume it via `$user.x` (auto-subscription).
 
 ## Bsky helpers (`/bsky`)
 
