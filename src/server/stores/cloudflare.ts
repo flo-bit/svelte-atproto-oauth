@@ -82,10 +82,12 @@ export function cloudflareKV<K extends string, V>(
 ): Store<K, V> | (() => Store<K, V> | undefined) {
 	if (typeof arg === 'string') {
 		return () => {
-			const env = getRequestEvent().platform?.env as
-				| Record<string, KVNamespaceLike | undefined>
+			// `App.Platform` is user-augmented; cast through unknown so the
+			// store doesn't depend on `env` being declared in the user's app.d.ts.
+			const platform = getRequestEvent().platform as unknown as
+				| { env?: Record<string, KVNamespaceLike | undefined> }
 				| undefined;
-			const ns = env?.[arg];
+			const ns = platform?.env?.[arg];
 			return ns ? new CloudflareKVStore<K, V>(ns, opts.ttl) : undefined;
 		};
 	}

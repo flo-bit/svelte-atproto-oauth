@@ -49,6 +49,67 @@ export async function readThroughCache<T>(
 const DEFAULT_DOH = 'https://mozilla.cloudflare-dns.com/dns-query';
 const DEFAULT_SLINGSHOT = 'https://slingshot.microcosm.blue';
 const DEFAULT_UFO = 'https://ufos-api.microcosm.blue';
+const DEFAULT_CONSTELLATION = 'https://constellation.microcosm.blue';
+
+// --- Microcosm health: per-host circuit breaker + request timeout -----------
+// Internal. After N consecutive failures (5xx, network errors, timeouts) the
+// breaker opens for `MICROCOSM_COOLDOWN_MS`; further calls fail fast until
+// cooldown expires. 4xx is treated as application-level (caller decides),
+// not a host-health signal.
+
+const MICROCOSM_FAILURE_THRESHOLD = 3;
+const MICROCOSM_COOLDOWN_MS = 60_000;
+const MICROCOSM_TIMEOUT_MS = 5_000;
+
+const microcosmFailures = new Map<string, number>();
+const microcosmOpenUntil = new Map<string, number>();
+
+function microcosmIsOpen(host: string): boolean {
+	const until = microcosmOpenUntil.get(host);
+	if (until === undefined) return false;
+	if (Date.now() >= until) {
+		microcosmOpenUntil.delete(host);
+		microcosmFailures.delete(host);
+		return false;
+	}
+	return true;
+}
+
+function microcosmRecordSuccess(host: string): void {
+	microcosmFailures.delete(host);
+	microcosmOpenUntil.delete(host);
+}
+
+function microcosmRecordFailure(host: string): void {
+	const n = (microcosmFailures.get(host) ?? 0) + 1;
+	microcosmFailures.set(host, n);
+	if (n >= MICROCOSM_FAILURE_THRESHOLD) {
+		microcosmOpenUntil.set(host, Date.now() + MICROCOSM_COOLDOWN_MS);
+	}
+}
+
+async function fetchMicrocosm(url: string): Promise<Response> {
+	const host = new URL(url).origin;
+	if (microcosmIsOpen(host)) {
+		throw new Error(`microcosm: circuit open for ${host}`);
+	}
+	const controller = new AbortController();
+	const timer = setTimeout(() => controller.abort(), MICROCOSM_TIMEOUT_MS);
+	try {
+		const r = await fetch(url, { signal: controller.signal });
+		if (r.status >= 500) {
+			microcosmRecordFailure(host);
+			throw new Error(`microcosm: ${host} returned ${r.status}`);
+		}
+		microcosmRecordSuccess(host);
+		return r;
+	} catch (e) {
+		microcosmRecordFailure(host);
+		throw e;
+	} finally {
+		clearTimeout(timer);
+	}
+}
 
 /**
  * Pass `slingshot: false` to disable, or a URL to use a different (e.g.
@@ -78,7 +139,7 @@ export async function resolveMiniDoc(
 	const base = options.slingshot ?? DEFAULT_SLINGSHOT;
 	try {
 		const url = `${base}/xrpc/blue.microcosm.identity.resolveMiniDoc?identifier=${encodeURIComponent(identifier)}`;
-		const r = await fetch(url);
+		const r = await fetchMicrocosm(url);
 		if (!r.ok) return undefined;
 		return (await r.json()) as MiniDoc;
 	} catch (e) {
@@ -319,7 +380,7 @@ export async function getRecordByUri(
 		try {
 			const params = new URLSearchParams({ at_uri: uri });
 			if (options.cid) params.set('cid', options.cid);
-			const r = await fetch(`${base}/xrpc/blue.microcosm.repo.getRecordByUri?${params}`);
+			const r = await fetchMicrocosm(`${base}/xrpc/blue.microcosm.repo.getRecordByUri?${params}`);
 			if (r.ok) {
 				return (await r.json()) as { cid: string; uri: string; value: unknown };
 			}
@@ -426,8 +487,8 @@ export async function loadHandles(
 }
 
 export interface UfoOptions {
-	/** UFO instance URL, or `false` to disable. Default `https://ufos-api.microcosm.blue`. */
-	ufo?: false | string;
+	/** UFO instance URL. Default `https://ufos-api.microcosm.blue`. */
+	ufo?: string;
 }
 
 export interface UfoRecord {
@@ -440,8 +501,7 @@ export interface UfoRecord {
 
 /**
  * Recent records seen on the firehose for a given collection, via UFO.
- * Returns `[]` on failure or when `ufo: false`. Pass a different `ufo`
- * URL to use a self-hosted instance.
+ * Returns `[]` on failure. Pass a different `ufo` URL to use a self-hosted instance.
  *
  * ```ts
  * const recent = await recentRecords('xyz.statusphere.status');
@@ -452,15 +512,208 @@ export async function recentRecords(
 	collection: string,
 	options: UfoOptions = {}
 ): Promise<UfoRecord[]> {
-	if (options.ufo === false) return [];
 	const base = options.ufo ?? DEFAULT_UFO;
 	try {
 		const url = `${base}/records?collection=${encodeURIComponent(collection)}`;
-		const r = await fetch(url);
+		const r = await fetchMicrocosm(url);
 		if (!r.ok) return [];
 		return (await r.json()) as UfoRecord[];
 	} catch (e) {
 		console.error('[atproto-oauth/helper] recentRecords failed:', e);
 		return [];
+	}
+}
+
+// --- Constellation: backlinks index -----------------------------------------
+// `https://constellation.microcosm.blue` indexes the firehose by *what links
+// to what*: given a target (AT URI or DID) and a {collection, path} source,
+// it answers "who linked to me" — likes, reposts, follows, replies, etc.
+// All calls are wrapped by `fetchMicrocosm` (5s timeout + circuit breaker).
+
+export interface ConstellationOptions {
+	/** Constellation instance URL. Default `https://constellation.microcosm.blue`. */
+	constellation?: string;
+}
+
+export interface BacklinkSource {
+	/** Collection NSID of the linking record, e.g. `app.bsky.feed.like`. */
+	collection: Collection;
+	/** JSON path within the linking record, e.g. `.subject.uri` or `.subject`. */
+	path: string;
+}
+
+export interface BacklinkRecord {
+	did: Did;
+	collection: string;
+	rkey: string;
+}
+
+export interface BacklinksPage {
+	total: number;
+	records: BacklinkRecord[];
+	cursor?: string;
+}
+
+export interface DistinctBacklinkersPage {
+	total: number;
+	dids: Did[];
+	cursor?: string;
+}
+
+/** All sources rolled up: `{ [collection]: { [path]: { records, distinct_dids } } }`. */
+export interface BacklinksRollup {
+	[collection: string]: {
+		[path: string]: { records: number; distinct_dids: number };
+	};
+}
+
+function constellationParams(target: string, source: BacklinkSource): URLSearchParams {
+	const path = source.path.startsWith('.') ? source.path : `.${source.path}`;
+	return new URLSearchParams({ target, collection: source.collection, path });
+}
+
+/**
+ * Count records that link to `target` from `source`. E.g. like-count for a
+ * post, follower-count for a DID. Returns `undefined` if Constellation is
+ * unavailable (`constellation: false`, circuit open, or upstream failure).
+ *
+ * ```ts
+ * const likes = await countBacklinks(postUri, {
+ *   collection: 'app.bsky.feed.like',
+ *   path: '.subject.uri'
+ * });
+ * ```
+ */
+export async function countBacklinks(
+	target: string,
+	source: BacklinkSource,
+	options: ConstellationOptions = {}
+): Promise<number | undefined> {
+	const base = options.constellation ?? DEFAULT_CONSTELLATION;
+	try {
+		const r = await fetchMicrocosm(`${base}/links/count?${constellationParams(target, source)}`);
+		if (!r.ok) return undefined;
+		return ((await r.json()) as { total: number }).total;
+	} catch (e) {
+		console.error('[atproto-oauth/helper] countBacklinks failed:', e);
+		return undefined;
+	}
+}
+
+/**
+ * Count *distinct* DIDs that link to `target` from `source`. E.g. for a
+ * post, this is the like-count deduped by liker; for a DID, distinct
+ * followers (a follow points one-to-one anyway, so usually equal to
+ * `countBacklinks`).
+ */
+export async function countDistinctBacklinkers(
+	target: string,
+	source: BacklinkSource,
+	options: ConstellationOptions = {}
+): Promise<number | undefined> {
+	const base = options.constellation ?? DEFAULT_CONSTELLATION;
+	try {
+		const r = await fetchMicrocosm(
+			`${base}/links/count/distinct-dids?${constellationParams(target, source)}`
+		);
+		if (!r.ok) return undefined;
+		return ((await r.json()) as { total: number }).total;
+	} catch (e) {
+		console.error('[atproto-oauth/helper] countDistinctBacklinkers failed:', e);
+		return undefined;
+	}
+}
+
+/**
+ * List records (their `{ did, collection, rkey }`) that link to `target`.
+ * Pass `cursor` back in to paginate. Optional `did` narrows to records from
+ * a single DID; `reverse` flips the order.
+ */
+export async function listBacklinks(
+	target: string,
+	source: BacklinkSource,
+	options: ConstellationOptions & {
+		did?: Did;
+		limit?: number;
+		reverse?: boolean;
+		cursor?: string;
+	} = {}
+): Promise<BacklinksPage | undefined> {
+	const base = options.constellation ?? DEFAULT_CONSTELLATION;
+	try {
+		const params = constellationParams(target, source);
+		if (options.did) params.set('did', options.did);
+		if (options.limit !== undefined) params.set('limit', String(options.limit));
+		if (options.reverse) params.set('reverse', 'true');
+		if (options.cursor) params.set('cursor', options.cursor);
+
+		const r = await fetchMicrocosm(`${base}/links?${params}`);
+		if (!r.ok) return undefined;
+		const data = (await r.json()) as {
+			total: number;
+			linking_records: BacklinkRecord[];
+			cursor: string | null;
+		};
+		return {
+			total: data.total,
+			records: data.linking_records,
+			cursor: data.cursor ?? undefined
+		};
+	} catch (e) {
+		console.error('[atproto-oauth/helper] listBacklinks failed:', e);
+		return undefined;
+	}
+}
+
+/**
+ * List the *distinct* DIDs that link to `target` from `source`. Paginates
+ * via `cursor`.
+ */
+export async function listDistinctBacklinkers(
+	target: string,
+	source: BacklinkSource,
+	options: ConstellationOptions & { limit?: number; cursor?: string } = {}
+): Promise<DistinctBacklinkersPage | undefined> {
+	const base = options.constellation ?? DEFAULT_CONSTELLATION;
+	try {
+		const params = constellationParams(target, source);
+		if (options.limit !== undefined) params.set('limit', String(options.limit));
+		if (options.cursor) params.set('cursor', options.cursor);
+
+		const r = await fetchMicrocosm(`${base}/links/distinct-dids?${params}`);
+		if (!r.ok) return undefined;
+		const data = (await r.json()) as {
+			total: number;
+			linking_dids: Did[];
+			cursor: string | null;
+		};
+		return {
+			total: data.total,
+			dids: data.linking_dids,
+			cursor: data.cursor ?? undefined
+		};
+	} catch (e) {
+		console.error('[atproto-oauth/helper] listDistinctBacklinkers failed:', e);
+		return undefined;
+	}
+}
+
+/**
+ * Roll up *all* sources that link to `target` — useful for a quick "what
+ * does the network say about this thing?" overview. Returns
+ * `{ [collection]: { [path]: { records, distinct_dids } } }`.
+ */
+export async function backlinksRollup(
+	target: string,
+	options: ConstellationOptions = {}
+): Promise<BacklinksRollup | undefined> {
+	const base = options.constellation ?? DEFAULT_CONSTELLATION;
+	try {
+		const r = await fetchMicrocosm(`${base}/links/all?target=${encodeURIComponent(target)}`);
+		if (!r.ok) return undefined;
+		return ((await r.json()) as { links: BacklinksRollup }).links;
+	} catch (e) {
+		console.error('[atproto-oauth/helper] backlinksRollup failed:', e);
+		return undefined;
 	}
 }

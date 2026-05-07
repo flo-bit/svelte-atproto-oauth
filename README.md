@@ -128,18 +128,64 @@ Pure atproto utilities — no auth state, no `event.locals` magic. Pass `did` ex
 | `describeRepo({ did, ... })` | repo metadata |
 | `getBlobURL({ did, blob })` | direct PDS blob URL |
 | `recentRecords(collection, opts?)` | recent records by collection from UFO firehose |
+| `countBacklinks(target, source, opts?)` | constellation: like-count, follower-count, etc. |
+| `countDistinctBacklinkers(target, source, opts?)` | constellation: distinct-DID count |
+| `listBacklinks(target, source, opts?)` | constellation: paginated linking records |
+| `listDistinctBacklinkers(target, source, opts?)` | constellation: paginated distinct DIDs |
+| `backlinksRollup(target, opts?)` | constellation: all sources rolled up |
 | `createTID()` | TID rkey |
 | `readThroughCache(cache, key, load)` | the generic cache wrapper used internally |
 
-### Slingshot / UFO options
+### Microcosm services (slingshot / UFO / constellation)
 
-By default, identity lookups go through slingshot (`https://slingshot.microcosm.blue`) and recent firehose lookups go through UFO (`https://ufos-api.microcosm.blue`). Both are part of [microcosm-rs](https://github.com/at-microcosm/microcosm-rs) ([tangled](https://tangled.org/microcosm.blue/microcosm-rs)) and are pluggable per call:
+By default, three [microcosm-rs](https://github.com/at-microcosm/microcosm-rs) services back the helpers ([tangled mirror](https://tangled.org/microcosm.blue/microcosm-rs)):
+
+| Service | Default URL | Used by |
+|---|---|---|
+| Slingshot | `slingshot.microcosm.blue` | identity (handle ↔ DID ↔ PDS), `getRecordByUri` |
+| UFO | `ufos-api.microcosm.blue` | `recentRecords` (firehose by collection) |
+| Constellation | `constellation.microcosm.blue` | backlinks (likes, follows, replies, …) |
+
+All three default URLs are swappable to a self-hosted instance per call:
 
 ```ts
-loadHandle(did, { slingshot: false });             // skip slingshot, use PLC + describeRepo
-loadHandle(did, { slingshot: 'https://my.host' }); // self-hosted slingshot
+loadHandle(did, { slingshot: 'https://my.host' });
 recentRecords('xyz.statusphere.status', { ufo: 'https://my.host' });
+countBacklinks(uri, source, { constellation: 'https://my.host' });
 ```
+
+Slingshot also accepts `slingshot: false` — disables the call and falls straight through to the PLC + `describeRepo` fallback (useful when slingshot is degraded for a particular case, or for testing the fallback path). UFO and Constellation have no fallback (no other index gives the same data), so they don't accept `false` — just don't call them if you don't want firehose / backlinks.
+
+All microcosm calls go through a per-host **circuit breaker** (3 consecutive failures → 60s open, then half-open) and a **5s request timeout**, so an outage fails fast — slingshot skips straight to the fallback, UFO/Constellation return empty/`undefined` immediately instead of hanging.
+
+### Constellation: backlinks
+
+Given a target (AT URI or DID) and a `{ collection, path }` source describing what links you're looking for, [Constellation](https://constellation.microcosm.blue/) answers "who linked to this":
+
+```ts
+import { countBacklinks, listDistinctBacklinkers } from '@svelte-atproto/oauth/helper';
+
+// like-count for a post
+const likes = await countBacklinks(postUri, {
+  collection: 'app.bsky.feed.like',
+  path: '.subject.uri'
+});
+
+// follower-count for a DID
+const followers = await countBacklinks(did, {
+  collection: 'app.bsky.graph.follow',
+  path: '.subject'
+});
+
+// who reposted a post
+const page = await listDistinctBacklinkers(postUri, {
+  collection: 'app.bsky.feed.repost',
+  path: '.subject.uri'
+}, { limit: 50 });
+const dids = page?.dids ?? [];
+```
+
+`backlinksRollup(target)` returns a `{ [collection]: { [path]: { records, distinct_dids } } }` rollup of every source pointing at `target` — handy for a "what does the network say about this" overview.
 
 ## Browser-only flow (`/browser`)
 

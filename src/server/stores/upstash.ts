@@ -52,6 +52,31 @@ class UpstashRedisStore<K extends string, V> implements Store<K, V> {
 	async delete(key: K): Promise<void> {
 		await this.cmd<number>(['DEL', this.k(key)]);
 	}
+
+	async clear(): Promise<void> {
+		// Refuse without a prefix — calling DEL across an unscoped database
+		// would wipe data this store doesn't own. Pass `prefix` to enable.
+		if (!this.opts.prefix) {
+			throw new Error(
+				'upstash store: clear() requires a `prefix` to scope the operation. ' +
+					'Without one, this would delete every key in the Redis database.'
+			);
+		}
+		const pattern = `${this.opts.prefix}*`;
+		let cursor = '0';
+		do {
+			const [next, keys] = await this.cmd<[string, string[]]>([
+				'SCAN',
+				cursor,
+				'MATCH',
+				pattern,
+				'COUNT',
+				1000
+			]);
+			if (keys.length > 0) await this.cmd<number>(['DEL', ...keys]);
+			cursor = next;
+		} while (cursor !== '0');
+	}
 }
 
 export function upstashRedis<K extends string, V>(opts: UpstashOptions): Store<K, V> {

@@ -284,7 +284,6 @@ export function createAtprotoBrowserAuth(config: BrowserAuthConfig): AtprotoBrow
 		const url = await createAuthorizationUrl({
 			target: { type: 'pds', serviceUrl: signupPDS },
 			scope: scopeString,
-			// @ts-expect-error — `prompt: 'create'` is a recent atproto extension
 			prompt: 'create'
 		});
 		await new Promise((resolve) => setTimeout(resolve, 100));
