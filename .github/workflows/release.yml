@@ -25,13 +25,12 @@ jobs:
         with:
           version: 10.10.0
 
+      # Node 24 ships with npm 11.x, which has trusted publishing support.
+      # (Node 22 ships with npm 10.x and the self-upgrade to npm 11 is fragile.)
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
           cache: 'pnpm'
-
-      # Trusted publishing requires npm >= 11.5.1
-      - run: npm install -g npm@latest
 
       - run: pnpm install --frozen-lockfile
 
