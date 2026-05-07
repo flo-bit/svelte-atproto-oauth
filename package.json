@@ -1,0 +1,85 @@
+{
+	"name": "@svelte-atproto/oauth",
+	"version": "0.0.1",
+	"type": "module",
+	"license": "MIT",
+	"description": "atproto OAuth for SvelteKit. Server (confidential) clients with pluggable session storage. Client (browser) entry coming soon.",
+	"keywords": [
+		"atproto",
+		"bluesky",
+		"oauth",
+		"sveltekit"
+	],
+	"author": "flo-bit",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/flo-bit/svelte-atproto-oauth.git",
+		"directory": "svelte-atproto-oauth"
+	},
+	"homepage": "https://github.com/flo-bit/svelte-atproto-oauth/tree/main/svelte-atproto-oauth#readme",
+	"bugs": "https://github.com/flo-bit/svelte-atproto-oauth/issues",
+	"files": [
+		"dist"
+	],
+	"bin": {
+		"atproto-oauth": "./dist/bin/cli.mjs"
+	},
+	"exports": {
+		"./server": {
+			"types": "./dist/server/index.d.mts",
+			"default": "./dist/server/index.mjs"
+		},
+		"./server/stores/memory": {
+			"types": "./dist/server/stores/memory.d.mts",
+			"default": "./dist/server/stores/memory.mjs"
+		},
+		"./server/stores/cloudflare": {
+			"types": "./dist/server/stores/cloudflare.d.mts",
+			"default": "./dist/server/stores/cloudflare.mjs"
+		},
+		"./server/stores/upstash": {
+			"types": "./dist/server/stores/upstash.d.mts",
+			"default": "./dist/server/stores/upstash.mjs"
+		},
+		"./client": {
+			"types": "./dist/client/index.d.mts",
+			"default": "./dist/client/index.mjs"
+		},
+		"./helper": {
+			"types": "./dist/helper/index.d.mts",
+			"default": "./dist/helper/index.mjs"
+		},
+		"./bsky": {
+			"types": "./dist/bsky/index.d.mts",
+			"default": "./dist/bsky/index.mjs"
+		}
+	},
+	"scripts": {
+		"build": "tsdown",
+		"dev": "tsdown --watch",
+		"check": "tsc --noEmit"
+	},
+	"dependencies": {
+		"@atcute/atproto": "^3.1.10",
+		"@atcute/bluesky": "^3.3.0",
+		"@atcute/client": "^4.2.1",
+		"@atcute/identity-resolver": "^1.2.2",
+		"@atcute/lexicons": "^1.2.9",
+		"@atcute/oauth-node-client": "^1.1.0",
+		"@atcute/tid": "^1.1.2"
+	},
+	"peerDependencies": {
+		"@sveltejs/kit": "^2.0.0",
+		"svelte": "^5.0.0"
+	},
+	"devDependencies": {
+		"@sveltejs/kit": "^2.55.0",
+		"@types/node": "^22.0.0",
+		"svelte": "^5.55.0",
+		"tsdown": "^0.21.7",
+		"typescript": "^6.0.0"
+	},
+	"publishConfig": {
+		"access": "public"
+	}
+}
