@@ -67,13 +67,13 @@
 		"prepublishOnly": "pnpm build"
 	},
 	"dependencies": {
-		"@atcute/atproto": "^3.1.10",
-		"@atcute/bluesky": "^3.3.0",
-		"@atcute/client": "^4.2.1",
-		"@atcute/identity-resolver": "^1.2.2",
-		"@atcute/lexicons": "^1.2.9",
-		"@atcute/oauth-browser-client": "^3.0.0",
-		"@atcute/oauth-node-client": "^1.1.0",
+		"@atcute/atproto": "^4.0.0",
+		"@atcute/bluesky": "^4.0.2",
+		"@atcute/client": "^5.0.0",
+		"@atcute/identity-resolver": "^2.0.0",
+		"@atcute/lexicons": "^2.0.0",
+		"@atcute/oauth-browser-client": "^4.0.0",
+		"@atcute/oauth-node-client": "^2.0.0",
 		"@atcute/tid": "^1.1.2"
 	},
 	"peerDependencies": {

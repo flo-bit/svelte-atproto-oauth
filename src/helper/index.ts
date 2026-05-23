@@ -231,12 +231,15 @@ export async function loadMiniDoc(
 
 /**
  * Parse an AT URI (`at://did:plc:xyz/app.bsky.feed.post/abc`) into
- * `{ repo, collection, rkey }`. Returns `undefined` if not a valid AT URI.
+ * `{ repo, collection, rkey, fragment }`. Returns `undefined` if not a
+ * valid AT URI.
  */
 export function parseUri(uri: string) {
-	const parts = parseResourceUri(uri);
-	if (!parts.ok) return;
-	return parts.value;
+	try {
+		return parseResourceUri(uri);
+	} catch {
+		return undefined;
+	}
 }
 
 /**
