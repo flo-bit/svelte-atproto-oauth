@@ -1,5 +1,42 @@
 # @svelte-atproto/oauth
 
+## 0.4.0
+
+### Minor Changes
+
+- b83ef16: Update all direct atcute dependencies to their latest releases, including oauth-browser-client 5.1.0, client 5.1.2, and lexicons 2.1.1. The wrapper API remains unchanged; real browser-SDK contract tests verify callback, restoration, refresh, reduced-grant, identity mismatch, and denial behavior against v5.
+
+  Refresh development dependencies and transitive resolutions while retaining SvelteKit 2, TypeScript 6, and Changesets 2. Use Node 24 LTS development types and tsdown 0.23.
+
+- b83ef16: Add shared network profiles and configurable PLC/actor/handle/DID resolution for server and browser OAuth, identity/repository helpers, external indexes, AppView, and CDN URLs.
+
+  Isolated testnet profiles require explicit routing and origins, namespace helper caches and browser state, and fail closed rather than selecting production defaults. Sandbox-only transport/HTTP exceptions are separate from production configuration. Isolated browser OAuth requires an application assertion that external egress controls are active because the browser SDK cannot use the profile transport for OAuth/resource requests.
+
+- b83ef16: Add `needsPermissions(result)` to the `/permissions` entry point. Recognize explicit insufficient-scope failures in atcute responses/errors and OAuth Bearer/DPoP challenges, without treating generic forbidden responses as missing scopes. Apps retain control over dialogs, authorization, and write retries.
+- b83ef16: Add per-login scope overrides, incremental authorization helpers, conservative capability checks, sanitized permission snapshots, and explicit refresh support for server and browser OAuth. Preserve original permission-set requests separately from token grants and migrate legacy server scope cookies without mass logout.
+
+  Valid sessions no longer sign out solely because configured scopes change. Scope removal does not revoke existing grants. Browser callbacks surface reduced grants explicitly because the underlying SDK stores the new session before returning it.
+
+### Patch Changes
+
+- b83ef16: Bind browser permission upgrades to a persistent login generation and coordinate lifecycle APIs across tabs with Web Locks. Logout waits for an in-flight callback and revokes/deletes its replacement before resolving; old upgrades cannot overwrite a later same-DID login. Failed remote revocation still removes the local session and generation.
+
+  Existing browser sessions acquire a generation when starting an upgrade without inventing scope history. Callbacks without the initiating tab's pending authorization, and legacy unbound upgrades, fail closed and must be restarted. Browser OAuth requires a secure context with Web Locks, matching the browser SDK requirement.
+
+- b83ef16: Deliver OAuth cookie mutations on responses returned directly from the SvelteKit handle hook. Use SvelteKit's public cookie serializer for logout deletions, legacy scope migration, and session cleanup; leave resolved routes and thrown redirects to SvelteKit to avoid duplicate headers.
+- b83ef16: Bind server permission upgrades to a persistent login generation and serialize logout revocation/deletion with refreshes and authorization commits. Pending upgrades cannot recreate a logged-out session or overwrite a later login for the same DID. Failed remote revocation still deletes the local session, and rejected callbacks consume their state, revoke their new tokens, and do not issue login cookies.
+
+  Session adapters must preserve the additional `svelteAtprotoSessionId` field alongside request history. Legacy sessions acquire it when starting an upgrade without inventing requested-scope history.
+
+- b83ef16: Return undefined without network requests from all five Constellation backlinks helpers when the service is explicitly disabled outside isolated mode, whether configured per call or on a production network profile. Preserve fail-closed errors for disabled or missing services on isolated networks.
+- b83ef16: Revalidate server callback error destinations after URL normalization, preventing dot-segment paths from becoming external scheme-relative redirects on denial, failure, or missing permissions.
+
+  Browser authorization outcomes now survive a `returnTo` page reload through a one-time, tab-local handoff bound to the OAuth client, network profile, and current account. Initialization consumes the outcome on arrival; new authorization and logout clear pending outcomes.
+
+- b83ef16: Production server clients now derive `client_id` and `jwks_uri` from the configured `metadataPath` and `jwksPath` instead of always using the default paths. Apps that customized either path get a new client ID matching the document they actually serve.
+
+  A transient storage read failure during a server token refresh no longer revokes the freshly refreshed tokens; the session is kept and only its requested-scope history is dropped (recoverable with `previousScope`). Browser `getPermissions()`/`can()` notify `user` subscribers only when the session or permissions actually change, and a failed browser restore no longer clears another tab's newer current login. Server restore warnings include the error class name, and `api.requestPermissions` hides upstream errors like `startLogin`.
+
 ## 0.3.0
 
 ### Minor Changes
