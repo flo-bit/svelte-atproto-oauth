@@ -12,7 +12,11 @@ For one-shot setup of a fresh SvelteKit project, use the [`@svelte-atproto/sv`](
 npx sv add @svelte-atproto
 ```
 
+Supports SvelteKit 2 and 3 with Svelte 5.
+
 ## Quick start (manual)
+
+The example below uses Kit 2 imports. For Kit 3, see the environment declarations and imports below.
 
 ```ts
 // src/lib/atproto/index.ts
@@ -52,7 +56,40 @@ declare global {
 export {};
 ```
 
-Generate dev secrets:
+### SvelteKit 3
+
+Declare the private environment variables in `src/env.ts` (`src/env.js` in a JavaScript project):
+
+```ts
+import { defineEnvVars } from '@sveltejs/kit/env';
+
+export const variables = defineEnvVars({
+  ORIGIN: {},
+  COOKIE_SECRET: {},
+  CLIENT_ASSERTION_KEY: {}
+});
+```
+
+In the auth config, replace the `$env/dynamic/private` import with named imports and use those values directly:
+
+```ts
+import { ORIGIN, COOKIE_SECRET, CLIENT_ASSERTION_KEY } from '$app/env/private';
+// createAtprotoAuth({ origin: ORIGIN, cookieSecret: COOKIE_SECRET, clientAssertionKey: CLIENT_ASSERTION_KEY, ... })
+```
+
+Use explicit subpath imports instead of `$lib`, including the index filename:
+
+```ts
+// src/hooks.server.ts
+import { atproto } from '#lib/atproto/index.js';
+export const handle = atproto.handle;
+```
+
+Declare `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN` too if using Upstash. The add-on handles these differences automatically for both Kit majors.
+
+### Secrets
+
+Generate dev secrets (both Kit versions):
 
 ```sh
 npx atproto-oauth setup   # writes COOKIE_SECRET + CLIENT_ASSERTION_KEY into .env
@@ -435,7 +472,7 @@ Pass them the atcute `Client` from a server or browser session created here.
 
 ## Development
 
-Use Node 24 LTS and pnpm. `pnpm test` runs type checks, builds, and regression tests. For manual server/browser testing, see the [progressive-permissions example](examples/progressive-permissions/README.md).
+Use Node 24 LTS and pnpm. `pnpm test` runs type checks, builds, and regression tests. CI runs the suite with both SvelteKit 2 and 3; the add-on's integration suite also checks, builds, and serves generated applications on both majors. For manual server/browser testing, see the [progressive-permissions example](examples/progressive-permissions/README.md).
 
 ## Status
 

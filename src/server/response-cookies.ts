@@ -10,24 +10,23 @@ export async function withCookieHeaders(
 	event: RequestEvent,
 	operation: () => Promise<Response | undefined>
 ): Promise<Response | undefined> {
-	const original = event.cookies;
+	const cookies = event.cookies;
+	const originalSet = cookies.set;
+	const originalDelete = cookies.delete;
 	const pending = new Map<string, string>();
 	const record = (name: string, value: string, options: Parameters<Cookies['set']>[2]) => {
-		const key = JSON.stringify([name, options.domain ?? '', options.path]);
-		pending.set(key, original.serialize(name, value, options));
+		const key = JSON.stringify([name, options?.domain ?? '', options?.path ?? '/']);
+		pending.set(key, cookies.serialize(name, value, options ?? { path: '/' }));
 	};
-	event.cookies = {
-		get: original.get.bind(original),
-		getAll: original.getAll.bind(original),
-		serialize: (name, value, options) => original.serialize(name, value, options),
-		set(name, value, options) {
-			original.set(name, value, options);
-			record(name, value, options);
-		},
-		delete(name, options) {
-			original.delete(name, options);
-			record(name, '', { ...options, maxAge: 0 });
-		}
+	// Kit 3 makes event.cookies readonly. Wrap its mutable methods instead of
+	// replacing the jar, retaining any additional methods supplied by Kit.
+	cookies.set = (name, value, options) => {
+		originalSet.call(cookies, name, value, options);
+		record(name, value, options);
+	};
+	cookies.delete = (name, options) => {
+		originalDelete.call(cookies, name, options);
+		record(name, '', { ...options, maxAge: 0 });
 	};
 	try {
 		const response = await operation();
@@ -41,6 +40,7 @@ export async function withCookieHeaders(
 			headers
 		});
 	} finally {
-		event.cookies = original;
+		cookies.set = originalSet;
+		cookies.delete = originalDelete;
 	}
 }

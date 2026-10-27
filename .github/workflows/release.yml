@@ -12,7 +12,13 @@ permissions:
 concurrency: ${{ github.workflow }}-${{ github.ref }}
 
 jobs:
+  test:
+    uses: ./.github/workflows/test.yml
+    permissions:
+      contents: read
+
   release:
+    needs: test
     name: Release
     timeout-minutes: 15
     runs-on: ubuntu-latest

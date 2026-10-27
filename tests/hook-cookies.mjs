@@ -27,7 +27,8 @@ function request(ctx, path, { method = 'GET', body, cookie } = {}) {
 	});
 	const jar = get_cookies(e.request, e.url);
 	jar.set_trailing_slash('never');
-	e.cookies = jar.cookies;
+	// Kit 3 exposes this property as readonly. The bridge must not replace it.
+	Object.defineProperty(e, 'cookies', { value: jar.cookies, writable: false });
 	ctx.t.event = e;
 	return { e, jar };
 }
@@ -138,6 +139,22 @@ test('cookie bridge supports immutable response headers', async () => {
 	assert.equal(e.cookies, jar.cookies);
 });
 
+test('cookie bridge restores the original methods after returned and thrown responses', async () => {
+	const ctx = setup();
+	const { e } = request(ctx, '/oauth/login');
+	const { set, delete: remove } = e.cookies;
+	const failure = new Error('handler failed');
+	await assert.rejects(withCookieHeaders(e, async () => {
+		e.cookies.set('test', 'value', { path: '/' });
+		throw failure;
+	}), (error) => error === failure);
+	assert.equal(e.cookies.set, set);
+	assert.equal(e.cookies.delete, remove);
+	assert.equal(await withCookieHeaders(e, async () => undefined), undefined);
+	assert.equal(e.cookies.set, set);
+	assert.equal(e.cookies.delete, remove);
+});
+
 test('state-bound return paths survive separate cookie-free login requests and reversed callbacks', async () => {
 	const ctx = setup();
 	const flows = [];
@@ -158,6 +175,10 @@ test('state-bound return paths survive separate cookie-free login requests and r
 		const response = new Response(null, { status: 303, headers: { location: returnTo } });
 		add_cookies_to_headers(response.headers, jar.new_cookies.values());
 		assert.equal(response.headers.getSetCookie().length, 2);
-		assert.ok(response.headers.getSetCookie().some((header) => header.startsWith('did=did%3Aplc%3A')));
+		// Kit 3's cookie serializer leaves colons unescaped; both encodings
+		// must carry the same signed DID cookie value.
+		assert.ok(response.headers.getSetCookie().some((header) =>
+			decodeURIComponent(header.split(';')[0]).startsWith('did=did:plc:')
+		));
 	}
 });

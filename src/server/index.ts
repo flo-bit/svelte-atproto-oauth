@@ -2,7 +2,7 @@ import { resolveConfig, type AtprotoAuthConfig } from './config.js';
 import { createHandle } from './handle.js';
 import { createHandlers, type Handlers } from './handlers.js';
 import { createApi, type Api, type CurrentSession } from './api.js';
-import type { Handle } from '@sveltejs/kit';
+import type { Handle } from './kit.js';
 
 export interface AtprotoAuth {
 	/** Mount in `hooks.server.ts`: `export const handle = atproto.handle;` */

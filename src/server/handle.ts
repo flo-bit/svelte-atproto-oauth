@@ -1,4 +1,5 @@
-import type { Handle, RequestEvent } from '@sveltejs/kit';
+import type { RequestEvent } from '@sveltejs/kit';
+import type { Handle } from './kit.js';
 import { building } from '$app/environment';
 import type { ResolvedConfig } from './config.js';
 import { restoreSession } from './session.js';
