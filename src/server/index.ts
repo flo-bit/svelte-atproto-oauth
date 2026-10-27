@@ -32,6 +32,11 @@ export function createAtprotoAuth(config: AtprotoAuthConfig): AtprotoAuth {
 }
 
 export type { AtprotoAuthConfig, CurrentSession, Handlers, Api };
+export type { LoginInput, PermissionInput } from './api.js';
+export type { RequestLock } from './lock.js';
+export type { AuthorizationHistory, SessionWithHistory } from './authorization.js';
+export type { Capability, Scope, PermissionSnapshot } from '../permissions/index.js';
+export { PermissionHistoryUnavailableError } from '../permissions/index.js';
 export type { SessionsStore, StatesStore, AnyStore } from './config.js';
 export type { Store, StoredSession, StoredState, OAuthSession } from '@atcute/oauth-node-client';
 export type { Did } from '@atcute/lexicons';

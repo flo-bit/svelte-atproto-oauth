@@ -6,6 +6,9 @@ import {
 } from '@atcute/oauth-node-client';
 import type { Did } from '@atcute/lexicons';
 import { dev } from '$app/environment';
+import { normalizeScope, validateScope } from '../permissions/index.js';
+import { localRequestLock, type RequestLock } from './lock.js';
+import { createActorResolver, networkFetch, type IdentityOptions } from '../network/index.js';
 
 export type SessionsStore = Store<Did, StoredSession>;
 export type StatesStore = Store<string, StoredState>;
@@ -25,7 +28,7 @@ export type AnyStore = Store<string, any>;
  */
 type StoreOrFactory<S> = S | (() => S | undefined | null);
 
-export interface AtprotoAuthConfig {
+export interface AtprotoAuthConfig extends IdentityOptions {
 	/**
 	 * Public origin of the deployed app (e.g. `https://mybookmarks.app`).
 	 * Leave undefined in dev → falls back to loopback (`http://127.0.0.1:<devPort>`).
@@ -46,7 +49,8 @@ export interface AtprotoAuthConfig {
 	clientAssertionKey?: string | undefined;
 
 	/**
-	 * OAuth scope. Default `'atproto'` (login only — identity, no write
+	 * Declared scopes and default login request. Override per flow with startLogin({ scope }).
+	 * Default `'atproto'` (login only — identity, no write
 	 * access). Add space-separated scope tokens for more permissions:
 	 * - `'atproto repo:app.bsky.feed.post'` — write to a collection
 	 * - `'atproto blob?accept=image/*'` — upload images
@@ -76,6 +80,9 @@ export interface AtprotoAuthConfig {
 	/** Path that POSTs to start a login flow (returns `{ url }`). Default `/oauth/login`. */
 	loginPath?: string;
 
+	/** Path that POSTs to request incremental permissions. Default `/oauth/permissions`. */
+	permissionsPath?: string;
+
 	/** Path that POSTs to log the user out. Default `/oauth/logout`. */
 	logoutPath?: string;
 
@@ -98,6 +105,11 @@ export interface AtprotoAuthConfig {
 	 * State store (10 min TTL). Optional — defaults to in-memory.
 	 */
 	states?: StoreOrFactory<AnyStore>;
+
+	/** Coordinates refreshes, authorization commits, and logout. Default is process-local.
+	 * Multi-instance deployments need a distributed lock AND a strongly consistent session store.
+	 */
+	requestLock?: RequestLock;
 }
 
 export interface ResolvedConfig {
@@ -110,7 +122,10 @@ export interface ResolvedConfig {
 	jwksPath: string;
 	loginPath: string;
 	logoutPath: string;
+	permissionsPath: string;
 	doh: string;
+	identity: IdentityOptions;
+	fetch: typeof globalThis.fetch | undefined;
 	dev: boolean;
 	devPort: number;
 	cookieMaxAge: number;
@@ -118,6 +133,7 @@ export interface ResolvedConfig {
 	scopeString: string;
 	resolveSessions: () => AnyStore;
 	resolveStates: () => AnyStore;
+	requestLock: RequestLock;
 }
 
 const DEFAULT_DOH = 'https://mozilla.cloudflare-dns.com/dns-query';
@@ -140,15 +156,15 @@ function asFactory<S extends AnyStore>(s: StoreOrFactory<S>, fallback: S): () =>
 	return () => s;
 }
 
-function normalizeScope(s: string | readonly string[] | undefined): string[] {
-	if (s === undefined) return [DEFAULT_SCOPE];
-	if (typeof s === 'string') return s.split(/\s+/).filter(Boolean);
-	return s.flatMap((entry) => entry.split(/\s+/).filter(Boolean));
-}
-
 let warnedDevSecret = false;
 
 export function resolveConfig(c: AtprotoAuthConfig): ResolvedConfig {
+	const identity: IdentityOptions = {
+		network: c.network, plc: c.plc, doh: c.doh, actorResolver: c.actorResolver,
+		handleResolver: c.handleResolver, didDocumentResolver: c.didDocumentResolver, fetch: c.fetch
+	};
+	createActorResolver(identity); // Validate explicit network configuration before starting OAuth.
+	const fetchThis = c.network || c.fetch ? networkFetch(identity) : undefined;
 	let cookieSecret = c.cookieSecret;
 	if (!cookieSecret) {
 		if (!dev) throw new Error('atproto-oauth: cookieSecret is required outside dev');
@@ -168,7 +184,8 @@ export function resolveConfig(c: AtprotoAuthConfig): ResolvedConfig {
 	const sessions = c.sessions ?? memSessions;
 	const states = c.states ?? memStates;
 
-	const scope = normalizeScope(c.scope);
+	const scope = normalizeScope(c.scope ?? DEFAULT_SCOPE);
+	validateScope(scope, scope);
 
 	return {
 		origin: c.origin || undefined,
@@ -180,13 +197,17 @@ export function resolveConfig(c: AtprotoAuthConfig): ResolvedConfig {
 		jwksPath: c.jwksPath ?? DEFAULT_JWKS_PATH,
 		loginPath: c.loginPath ?? DEFAULT_LOGIN_PATH,
 		logoutPath: c.logoutPath ?? DEFAULT_LOGOUT_PATH,
+		permissionsPath: c.permissionsPath ?? '/oauth/permissions',
 		doh: c.doh ?? DEFAULT_DOH,
+		identity,
+		fetch: fetchThis,
 		dev,
 		devPort: c.devPort ?? DEFAULT_DEV_PORT,
 		cookieMaxAge: c.cookieMaxAge ?? DEFAULT_MAX_AGE,
 		scope,
 		scopeString: scope.join(' '),
 		resolveSessions: asFactory(sessions, memSessions),
-		resolveStates: asFactory(states, memStates)
+		resolveStates: asFactory(states, memStates),
+		requestLock: c.requestLock ?? localRequestLock
 	};
 }

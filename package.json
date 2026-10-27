@@ -3,7 +3,7 @@
 	"version": "0.3.0",
 	"type": "module",
 	"license": "MIT",
-	"description": "atproto OAuth for SvelteKit. Server (confidential) clients with pluggable session storage. Client (browser) entry coming soon.",
+	"description": "atproto OAuth for SvelteKit with progressive permissions, server/browser clients, and pluggable session storage.",
 	"keywords": [
 		"atproto",
 		"bluesky",
@@ -48,6 +48,14 @@
 			"types": "./dist/browser/index.d.mts",
 			"default": "./dist/browser/index.mjs"
 		},
+		"./permissions": {
+			"types": "./dist/permissions/index.d.mts",
+			"default": "./dist/permissions/index.mjs"
+		},
+		"./network": {
+			"types": "./dist/network/index.d.mts",
+			"default": "./dist/network/index.mjs"
+		},
 		"./helper": {
 			"types": "./dist/helper/index.d.mts",
 			"default": "./dist/helper/index.mjs"
@@ -61,32 +69,37 @@
 		"build": "tsdown",
 		"dev": "tsdown --watch",
 		"check": "tsc --noEmit",
+		"test": "pnpm check && pnpm build && node --test tests/*.mjs",
+		"test:permissions": "pnpm check && pnpm build && node --test tests/permissions.mjs tests/permission-failure.mjs tests/server-auth.mjs tests/browser-auth.mjs tests/browser-lifecycle.mjs tests/browser-sdk-contract.mjs tests/client-auth.mjs",
+		"dev:permissions": "pnpm build && pnpm --dir examples/progressive-permissions install --force && pnpm --dir examples/progressive-permissions dev",
 		"changeset": "changeset",
 		"version-packages": "changeset version",
 		"release": "pnpm build && changeset publish",
 		"prepublishOnly": "pnpm build"
 	},
 	"dependencies": {
-		"@atcute/atproto": "^4.0.0",
-		"@atcute/bluesky": "^4.0.2",
-		"@atcute/client": "^5.0.0",
-		"@atcute/identity-resolver": "^2.0.0",
-		"@atcute/lexicons": "^2.0.0",
-		"@atcute/oauth-browser-client": "^4.0.0",
-		"@atcute/oauth-node-client": "^2.0.0",
-		"@atcute/tid": "^1.1.2"
+		"@atcute/atproto": "^4.0.4",
+		"@atcute/bluesky": "^4.0.23",
+		"@atcute/client": "^5.1.2",
+		"@atcute/identity-resolver": "^2.0.2",
+		"@atcute/lexicons": "^2.1.1",
+		"@atcute/oauth-browser-client": "^5.1.0",
+		"@atcute/oauth-node-client": "^2.0.1",
+		"@atcute/tid": "^1.1.4"
 	},
 	"peerDependencies": {
 		"@sveltejs/kit": "^2.0.0",
 		"svelte": "^5.0.0"
 	},
 	"devDependencies": {
-		"@changesets/cli": "^2.27.0",
-		"@sveltejs/kit": "^2.55.0",
-		"@types/node": "^22.0.0",
-		"svelte": "^5.55.0",
-		"tsdown": "^0.21.7",
-		"typescript": "^6.0.0"
+		"@changesets/cli": "^2.31.1",
+		"@sveltejs/kit": "^2.70.3",
+		"@sveltejs/vite-plugin-svelte": "^7.3.1",
+		"@types/node": "^24.19.2",
+		"svelte": "^5.57.2",
+		"tsdown": "^0.23.0",
+		"typescript": "^6.0.3",
+		"vite": "^8.3.4"
 	},
 	"publishConfig": {
 		"access": "public"

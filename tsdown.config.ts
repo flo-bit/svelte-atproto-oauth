@@ -8,6 +8,8 @@ export default defineConfig({
 		'src/server/stores/upstash.ts',
 		'src/client/index.ts',
 		'src/browser/index.ts',
+		'src/permissions/index.ts',
+		'src/network/index.ts',
 		'src/helper/index.ts',
 		'src/bsky/index.ts',
 		'src/bin/cli.ts'

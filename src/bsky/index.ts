@@ -3,17 +3,15 @@ import { Client, simpleFetchHandler } from '@atcute/client';
 import type { AppBskyActorDefs } from '@atcute/bluesky';
 import type { Did } from '@atcute/lexicons';
 import type { Store } from '@atcute/oauth-node-client';
-import { describeRepo, readThroughCache } from '../helper/index.js';
-
-const DEFAULT_APPVIEW = 'https://public.api.bsky.app';
-const DEFAULT_CDN = 'https://cdn.bsky.app';
+import { describeRepo, readThroughCache, type LoadMiniDocOptions } from '../helper/index.js';
+import { requiredEndpoint, networkFetch, networkCacheKey, type IdentityOptions } from '../network/index.js';
 
 export type BskyProfile = AppBskyActorDefs.ProfileViewDetailed;
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Cache = Store<string, any>;
 
-export interface LoadBskyProfileOptions {
+export interface LoadBskyProfileOptions extends LoadMiniDocOptions {
 	/** AppView URL. Default `https://public.api.bsky.app`. */
 	appview?: string;
 	/** Optional cache. Any `Store`. */
@@ -39,28 +37,33 @@ export async function loadBskyProfile(
 	did: Did,
 	options: LoadBskyProfileOptions = {}
 ): Promise<BskyProfile | undefined> {
-	const appview = options.appview ?? DEFAULT_APPVIEW;
+	const appview = requiredEndpoint(options, 'appview', options.appview);
 
-	return readThroughCache(options.cache, did, async () => {
-		const client = new Client({ handler: simpleFetchHandler({ service: appview }) });
+	return readThroughCache(options.cache, networkCacheKey(options, did, 'bsky-profile'), async () => {
+		const client = new Client({ handler: simpleFetchHandler({ service: appview, fetch: networkFetch(options) }) });
 		try {
 			const r = await client.get('app.bsky.actor.getProfile', { params: { actor: did } });
-			if (!r.ok) return await fallbackProfile(did);
-			if (r.data.handle === 'handle.invalid') return await fallbackProfile(did);
+			if (!r.ok) {
+				if (options.network?.isolated) throw new Error(`AppView failed (${r.status})`);
+				return await fallbackProfile(did, options);
+			}
+			if (r.data.handle === 'handle.invalid') return await fallbackProfile(did, options);
 			return r.data;
 		} catch (e) {
+			if (options.network?.isolated) throw e;
 			console.error('[atproto-oauth/bsky] loadBskyProfile failed:', e);
-			return await fallbackProfile(did);
+			return await fallbackProfile(did, options);
 		}
 	});
 }
 
-async function fallbackProfile(did: Did): Promise<BskyProfile | undefined> {
+async function fallbackProfile(did: Did, options: LoadBskyProfileOptions): Promise<BskyProfile | undefined> {
 	try {
-		const repo = await describeRepo({ did });
+		const repo = await describeRepo({ did, ...options });
 		if (!repo) return;
 		return { did, handle: repo.handle ?? 'handle.invalid' } as BskyProfile;
-	} catch {
+	} catch (e) {
+		if (options.network?.isolated) throw e;
 		return;
 	}
 }
@@ -87,7 +90,7 @@ export async function loadBskyProfiles(
 		await Promise.all(
 			dids.map(async (did) => {
 				try {
-					const hit = (await cache.get(did)) as BskyProfile | undefined;
+					const hit = (await cache.get(networkCacheKey(options, did, 'bsky-profile'))) as BskyProfile | undefined;
 					if (hit !== undefined) result[did] = hit;
 					else toFetch.push(did);
 				} catch {
@@ -100,8 +103,8 @@ export async function loadBskyProfiles(
 	}
 
 	if (toFetch.length > 0) {
-		const appview = options.appview ?? DEFAULT_APPVIEW;
-		const client = new Client({ handler: simpleFetchHandler({ service: appview }) });
+		const appview = requiredEndpoint(options, 'appview', options.appview);
+		const client = new Client({ handler: simpleFetchHandler({ service: appview, fetch: networkFetch(options) }) });
 
 		for (let i = 0; i < toFetch.length; i += 25) {
 			const batch = toFetch.slice(i, i + 25);
@@ -114,13 +117,14 @@ export async function loadBskyProfiles(
 						const did = profile.did as string;
 						result[did] = profile as BskyProfile;
 						if (cache) {
-							Promise.resolve(cache.set(did, profile)).catch((e: unknown) => {
+							Promise.resolve(cache.set(networkCacheKey(options, did, 'bsky-profile'), profile)).catch((e: unknown) => {
 								console.error('[atproto-oauth/bsky] cache set failed:', e);
 							});
 						}
 					}
-				}
+				} else if (options.network?.isolated) throw new Error(`AppView batch failed (${r.status})`);
 			} catch (e) {
+				if (options.network?.isolated) throw e;
 				console.error('[atproto-oauth/bsky] loadBskyProfiles batch failed:', e);
 			}
 		}
@@ -139,16 +143,20 @@ export async function loadBskyProfiles(
  */
 export async function getDetailedProfile({
 	did,
-	appview = DEFAULT_APPVIEW,
-	client
+	appview,
+	client,
+	...options
 }: {
 	did: Did;
 	appview?: string;
 	client?: Client;
-}): Promise<BskyProfile | undefined> {
-	client ??= new Client({ handler: simpleFetchHandler({ service: appview }) });
+} & IdentityOptions): Promise<BskyProfile | undefined> {
+	client ??= new Client({ handler: simpleFetchHandler({ service: requiredEndpoint(options, 'appview', appview), fetch: networkFetch(options) }) });
 	const r = await client.get('app.bsky.actor.getProfile', { params: { actor: did } });
-	if (!r.ok) return;
+	if (!r.ok) {
+		if (options.network?.isolated) throw new Error(`AppView failed (${r.status})`);
+		return;
+	}
 	return r.data;
 }
 
@@ -156,17 +164,21 @@ export async function getDetailedProfile({
 export async function searchActorsTypeahead({
 	q,
 	limit = 10,
-	appview = DEFAULT_APPVIEW
+	appview,
+	...options
 }: {
 	q: string;
 	limit?: number;
 	appview?: string;
-}): Promise<{ actors: AppBskyActorDefs.ProfileViewBasic[]; q: string }> {
-	const client = new Client({ handler: simpleFetchHandler({ service: appview }) });
+} & IdentityOptions): Promise<{ actors: AppBskyActorDefs.ProfileViewBasic[]; q: string }> {
+	const client = new Client({ handler: simpleFetchHandler({ service: requiredEndpoint(options, 'appview', appview), fetch: networkFetch(options) }) });
 	const r = await client.get('app.bsky.actor.searchActorsTypeahead', {
 		params: { q, limit }
 	});
-	if (!r.ok) return { actors: [], q };
+	if (!r.ok) {
+		if (options.network?.isolated) throw new Error(`AppView search failed (${r.status})`);
+		return { actors: [], q };
+	}
 	return { actors: r.data.actors, q };
 }
 
@@ -181,13 +193,16 @@ export type CDNPreset =
 export function getCDNImageBlobUrl({
 	did,
 	blob,
-	cdn = DEFAULT_CDN,
-	preset = 'feed_thumbnail'
+	cdn,
+	preset = 'feed_thumbnail',
+	network
 }: {
 	did: string;
 	blob: { $type: 'blob'; ref: { $link: string } };
 	cdn?: string;
 	preset?: CDNPreset;
+	network?: IdentityOptions['network'];
 }): string {
-	return `${cdn}/img/${preset}/plain/${did}/${blob.ref.$link}@webp`;
+	const base = requiredEndpoint({ network }, 'cdn', cdn);
+	return `${base}/img/${preset}/plain/${did}/${blob.ref.$link}@webp`;
 }

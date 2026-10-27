@@ -2,13 +2,9 @@ import '@atcute/atproto';
 import { parseResourceUri, type Did, type Handle } from '@atcute/lexicons';
 import { isDid } from '@atcute/lexicons/syntax';
 import {
-	CompositeDidDocumentResolver,
-	CompositeHandleResolver,
-	DohJsonHandleResolver,
-	PlcDidDocumentResolver,
-	WebDidDocumentResolver,
-	WellKnownHandleResolver
-} from '@atcute/identity-resolver';
+	createActorResolver, createDidDocumentResolver, createHandleResolver,
+	endpoint, requiredEndpoint, networkFetch, networkCacheKey, type IdentityOptions
+} from '../network/index.js';
 import { Client, simpleFetchHandler } from '@atcute/client';
 import type { Store } from '@atcute/oauth-node-client';
 import * as TID from '@atcute/tid';
@@ -45,11 +41,6 @@ export async function readThroughCache<T>(
 
 	return value;
 }
-
-const DEFAULT_DOH = 'https://mozilla.cloudflare-dns.com/dns-query';
-const DEFAULT_SLINGSHOT = 'https://slingshot.microcosm.blue';
-const DEFAULT_UFO = 'https://ufos-api.microcosm.blue';
-const DEFAULT_CONSTELLATION = 'https://constellation.microcosm.blue';
 
 // --- Microcosm health: per-host circuit breaker + request timeout -----------
 // Internal. After N consecutive failures (5xx, network errors, timeouts) the
@@ -88,20 +79,21 @@ function microcosmRecordFailure(host: string): void {
 	}
 }
 
-async function fetchMicrocosm(url: string): Promise<Response> {
-	const host = new URL(url).origin;
+async function fetchMicrocosm(url: string, options: Pick<IdentityOptions, 'network' | 'fetch'>): Promise<Response> {
+	const host = networkCacheKey(options, new URL(url).origin);
 	if (microcosmIsOpen(host)) {
 		throw new Error(`microcosm: circuit open for ${host}`);
 	}
 	const controller = new AbortController();
 	const timer = setTimeout(() => controller.abort(), MICROCOSM_TIMEOUT_MS);
 	try {
-		const r = await fetch(url, { signal: controller.signal });
+		const r = await networkFetch(options)(url, { signal: controller.signal });
 		if (r.status >= 500) {
 			microcosmRecordFailure(host);
 			throw new Error(`microcosm: ${host} returned ${r.status}`);
 		}
 		microcosmRecordSuccess(host);
+		if (options.network?.isolated && !r.ok) throw new Error(`Private-network helper failed (${r.status})`);
 		return r;
 	} catch (e) {
 		microcosmRecordFailure(host);
@@ -115,7 +107,7 @@ async function fetchMicrocosm(url: string): Promise<Response> {
  * Pass `slingshot: false` to disable, or a URL to use a different (e.g.
  * self-hosted) instance. Default: `https://slingshot.microcosm.blue`.
  */
-export interface SlingshotOptions {
+export interface SlingshotOptions extends IdentityOptions {
 	slingshot?: false | string;
 }
 
@@ -135,73 +127,77 @@ export async function resolveMiniDoc(
 	identifier: string,
 	options: SlingshotOptions = {}
 ): Promise<MiniDoc | undefined> {
-	if (options.slingshot === false) return undefined;
-	const base = options.slingshot ?? DEFAULT_SLINGSHOT;
+	const base = endpoint(options, 'slingshot', options.slingshot);
+	if (base === false) return undefined;
 	try {
 		const url = `${base}/xrpc/blue.microcosm.identity.resolveMiniDoc?identifier=${encodeURIComponent(identifier)}`;
-		const r = await fetchMicrocosm(url);
-		if (!r.ok) return undefined;
-		return (await r.json()) as MiniDoc;
+		const r = await fetchMicrocosm(url, options);
+		if (!r.ok) {
+			if (options.network?.isolated) throw new Error(`Slingshot failed (${r.status})`);
+			return undefined;
+		}
+		const mini = (await r.json()) as MiniDoc;
+		options.network?.assertUrl(mini.pds);
+		return mini;
 	} catch (e) {
+		if (options.network?.isolated) throw e;
 		console.error('[atproto-oauth/helper] resolveMiniDoc failed:', e);
 		return undefined;
 	}
 }
 
-const handleResolver = (doh: string) =>
-	new CompositeHandleResolver({
-		methods: {
-			dns: new DohJsonHandleResolver({ dohUrl: doh }),
-			http: new WellKnownHandleResolver()
-		}
-	});
-
-const didResolver = new CompositeDidDocumentResolver({
-	methods: {
-		plc: new PlcDidDocumentResolver(),
-		web: new WebDidDocumentResolver()
-	}
-});
-
-async function fallbackPds(did: Did): Promise<string | undefined> {
+async function fallbackPds(did: Did, options: IdentityOptions): Promise<string | undefined> {
 	try {
-		const doc = await didResolver.resolve(did as Did<'plc'> | Did<'web'>);
+		if (options.actorResolver ?? options.network?.identity.actorResolver)
+			return (await createActorResolver(options).resolve(did)).pds;
+		const doc = await createDidDocumentResolver(options).resolve(did);
 		if (!doc.service) return;
 		for (const service of doc.service) {
 			if (service.id === '#atproto_pds') {
-				return service.serviceEndpoint.toString();
+				const pds = service.serviceEndpoint.toString();
+				options.network?.assertUrl(pds);
+				return pds;
 			}
 		}
 	} catch (e) {
+		if (options.network?.isolated) throw e;
 		console.error('[atproto-oauth/helper] PDS resolution failed:', e);
 	}
 }
 
 async function fallbackMiniDoc(
 	identifier: string,
-	doh: string
+	options: IdentityOptions
 ): Promise<MiniDoc | undefined> {
+	if (options.actorResolver ?? options.network?.identity.actorResolver) {
+		return await createActorResolver(options).resolve(identifier as Did | Handle);
+	}
 	let did: Did;
 	if (isDid(identifier)) {
 		did = identifier;
 	} else {
 		try {
-			did = await handleResolver(doh).resolve(identifier as Handle);
+			did = await createHandleResolver(options).resolve(identifier as Handle);
 		} catch (e) {
+			if (options.network?.isolated) throw e;
 			console.error('[atproto-oauth/helper] handle resolution failed:', e);
 			return undefined;
 		}
 	}
 
-	const pds = await fallbackPds(did);
+	const pds = await fallbackPds(did, options);
 	if (!pds) return undefined;
 
 	try {
-		const client = new Client({ handler: simpleFetchHandler({ service: pds }) });
+		const client = new Client({ handler: simpleFetchHandler({ service: pds, fetch: networkFetch(options) }) });
 		const r = await client.get('com.atproto.repo.describeRepo', { params: { repo: did } });
-		if (!r.ok) return { did, handle: 'handle.invalid', pds };
+		if (!r.ok) {
+			if (options.network?.isolated) throw new Error(`Repository discovery failed (${r.status})`);
+			return { did, handle: 'handle.invalid', pds };
+		}
 		return { did, handle: r.data.handle, pds };
-	} catch {
+	} catch (e) {
+		if (options.network?.isolated) throw e;
 		return { did, handle: 'handle.invalid', pds };
 	}
 }
@@ -222,10 +218,10 @@ export async function loadMiniDoc(
 	identifier: string,
 	options: LoadMiniDocOptions = {}
 ): Promise<MiniDoc | undefined> {
-	return readThroughCache(options.cache, identifier, async () => {
+	return readThroughCache(options.cache, networkCacheKey(options, identifier, 'identity'), async () => {
 		const fast = await resolveMiniDoc(identifier, options);
 		if (fast) return fast;
-		return fallbackMiniDoc(identifier, options.doh ?? DEFAULT_DOH);
+		return fallbackMiniDoc(identifier, options);
 	});
 }
 
@@ -246,17 +242,12 @@ export function parseUri(uri: string) {
  * Resolve a handle to a DID. Tries slingshot first, falls back to DoH +
  * `.well-known`.
  */
-export async function resolveHandle({
-	handle,
-	doh = DEFAULT_DOH,
-	slingshot
-}: {
-	handle: Handle;
-	doh?: string;
-} & SlingshotOptions): Promise<Did> {
-	const mini = await resolveMiniDoc(handle, { slingshot });
+export async function resolveHandle({ handle, ...options }: { handle: Handle } & SlingshotOptions): Promise<Did> {
+	const mini = await resolveMiniDoc(handle, options);
 	if (mini?.did) return mini.did;
-	return await handleResolver(doh).resolve(handle);
+	if (options.actorResolver ?? options.network?.identity.actorResolver)
+		return (await createActorResolver(options).resolve(handle)).did;
+	return await createHandleResolver(options).resolve(handle);
 }
 
 /**
@@ -264,13 +255,12 @@ export async function resolveHandle({
  */
 export async function actorToDid(
 	actor: string,
-	options: { doh?: string } & SlingshotOptions = {}
+	options: SlingshotOptions = {}
 ): Promise<Did> {
 	if (isDid(actor)) return actor;
 	return await resolveHandle({
 		handle: actor as Handle,
-		doh: options.doh,
-		slingshot: options.slingshot
+		...options
 	});
 }
 
@@ -284,7 +274,7 @@ export async function getPDS(
 ): Promise<string | undefined> {
 	const mini = await resolveMiniDoc(did, options);
 	if (mini?.pds) return mini.pds;
-	return await fallbackPds(did);
+	return await fallbackPds(did, options);
 }
 
 /**
@@ -296,7 +286,7 @@ export async function getPDSClient(
 ): Promise<Client> {
 	const pds = await getPDS(did, options);
 	if (!pds) throw new Error(`PDS not found for ${did}`);
-	return new Client({ handler: simpleFetchHandler({ service: pds }) });
+	return new Client({ handler: simpleFetchHandler({ service: pds, fetch: networkFetch(options) }) });
 }
 
 /**
@@ -309,7 +299,7 @@ export async function listRecords({
 	cursor,
 	limit = 100,
 	client,
-	slingshot
+	...options
 }: {
 	did: Did;
 	collection: Collection;
@@ -320,7 +310,7 @@ export async function listRecords({
 	if (!did) throw new Error('listRecords: did is required');
 	if (!collection) throw new Error('listRecords: collection is required');
 
-	client ??= await getPDSClient({ did }, { slingshot });
+	client ??= await getPDSClient({ did }, options);
 
 	const allRecords = [];
 	let currentCursor = cursor;
@@ -335,7 +325,10 @@ export async function listRecords({
 			}
 		});
 
-		if (!response.ok) return allRecords;
+		if (!response.ok) {
+			if (options.network?.isolated) throw new Error(`Record listing failed (${response.status})`);
+			return allRecords;
+		}
 
 		allRecords.push(...response.data.records);
 		currentCursor = response.data.cursor;
@@ -352,7 +345,7 @@ export async function getRecord({
 	collection,
 	rkey = 'self',
 	client,
-	slingshot
+	...options
 }: {
 	did: Did;
 	collection: Collection;
@@ -362,10 +355,11 @@ export async function getRecord({
 	if (!did) throw new Error('getRecord: did is required');
 	if (!collection) throw new Error('getRecord: collection is required');
 
-	client ??= await getPDSClient({ did }, { slingshot });
+	client ??= await getPDSClient({ did }, options);
 	const record = await client.get('com.atproto.repo.getRecord', {
 		params: { repo: did, collection, rkey }
 	});
+	if (!record.ok && options.network?.isolated) throw new Error(`Record lookup failed (${record.status})`);
 	return JSON.parse(JSON.stringify(record.data));
 }
 
@@ -378,16 +372,18 @@ export async function getRecordByUri(
 	uri: string,
 	options: SlingshotOptions & { cid?: string; client?: Client } = {}
 ): Promise<{ cid: string; uri: string; value: unknown } | undefined> {
-	if (options.slingshot !== false) {
-		const base = options.slingshot ?? DEFAULT_SLINGSHOT;
+	const base = endpoint(options, 'slingshot', options.slingshot);
+	if (base !== false) {
 		try {
 			const params = new URLSearchParams({ at_uri: uri });
 			if (options.cid) params.set('cid', options.cid);
-			const r = await fetchMicrocosm(`${base}/xrpc/blue.microcosm.repo.getRecordByUri?${params}`);
+			const r = await fetchMicrocosm(`${base}/xrpc/blue.microcosm.repo.getRecordByUri?${params}`, options);
 			if (r.ok) {
 				return (await r.json()) as { cid: string; uri: string; value: unknown };
 			}
+			if (options.network?.isolated) throw new Error(`Slingshot record lookup failed (${r.status})`);
 		} catch (e) {
+			if (options.network?.isolated) throw e;
 			console.error('[atproto-oauth/helper] slingshot getRecordByUri failed:', e);
 		}
 	}
@@ -399,11 +395,12 @@ export async function getRecordByUri(
 			did: parts.repo as Did,
 			collection: parts.collection as Collection,
 			rkey: parts.rkey,
-			client: options.client,
-			slingshot: options.slingshot
+			...options,
+			client: options.client
 		});
 		return data;
-	} catch {
+	} catch (e) {
+		if (options.network?.isolated) throw e;
 		return undefined;
 	}
 }
@@ -414,17 +411,20 @@ export async function getRecordByUri(
 export async function describeRepo({
 	did,
 	client,
-	slingshot
+	...options
 }: {
 	did: Did;
 	client?: Client;
 } & SlingshotOptions) {
 	if (!did) throw new Error('describeRepo: did is required');
-	client ??= await getPDSClient({ did }, { slingshot });
+	client ??= await getPDSClient({ did }, options);
 	const r = await client.get('com.atproto.repo.describeRepo', {
 		params: { repo: did }
 	});
-	if (!r.ok) return;
+	if (!r.ok) {
+		if (options.network?.isolated) throw new Error(`Repository discovery failed (${r.status})`);
+		return;
+	}
 	return r.data;
 }
 
@@ -435,12 +435,13 @@ export async function describeRepo({
 export async function getBlobURL({
 	did,
 	blob,
-	slingshot
+	...options
 }: {
 	did: Did;
 	blob: { $type: 'blob'; ref: { $link: string } };
 } & SlingshotOptions): Promise<string> {
-	const pds = await getPDS(did, { slingshot });
+	const pds = await getPDS(did, options);
+	if (!pds) throw new Error('PDS resolution failed');
 	return `${pds}/xrpc/com.atproto.sync.getBlob?did=${did}&cid=${blob.ref.$link}`;
 }
 
@@ -451,7 +452,7 @@ export function createTID(): string {
 	return TID.now();
 }
 
-export interface LoadHandleOptions {
+export interface LoadHandleOptions extends LoadMiniDocOptions {
 	/** Optional cache keyed by DID. Any `Store` (memory, cloudflareKV, upstashRedis, …). */
 	cache?: Cache;
 	/** Slingshot instance URL, or `false` to disable. Default `https://slingshot.microcosm.blue`. */
@@ -489,9 +490,9 @@ export async function loadHandles(
 	return Object.fromEntries(entries);
 }
 
-export interface UfoOptions {
+export interface UfoOptions extends Pick<IdentityOptions, 'network' | 'fetch'> {
 	/** UFO instance URL. Default `https://ufos-api.microcosm.blue`. */
-	ufo?: string;
+	ufo?: string | false;
 }
 
 export interface UfoRecord {
@@ -515,13 +516,17 @@ export async function recentRecords(
 	collection: string,
 	options: UfoOptions = {}
 ): Promise<UfoRecord[]> {
-	const base = options.ufo ?? DEFAULT_UFO;
+	const base = requiredEndpoint(options, 'ufo', options.ufo);
 	try {
 		const url = `${base}/records?collection=${encodeURIComponent(collection)}`;
-		const r = await fetchMicrocosm(url);
-		if (!r.ok) return [];
+		const r = await fetchMicrocosm(url, options);
+		if (!r.ok) {
+			if (options.network?.isolated) throw new Error(`UFO failed (${r.status})`);
+			return [];
+		}
 		return (await r.json()) as UfoRecord[];
 	} catch (e) {
+		if (options.network?.isolated) throw e;
 		console.error('[atproto-oauth/helper] recentRecords failed:', e);
 		return [];
 	}
@@ -533,9 +538,10 @@ export async function recentRecords(
 // it answers "who linked to me" — likes, reposts, follows, replies, etc.
 // All calls are wrapped by `fetchMicrocosm` (5s timeout + circuit breaker).
 
-export interface ConstellationOptions {
-	/** Constellation instance URL. Default `https://constellation.microcosm.blue`. */
-	constellation?: string;
+export interface ConstellationOptions extends Pick<IdentityOptions, 'network' | 'fetch'> {
+	/** Constellation instance URL. Default `https://constellation.microcosm.blue`.
+	 * false returns undefined without fetching in production; isolated calls throw. */
+	constellation?: string | false;
 }
 
 export interface BacklinkSource {
@@ -570,6 +576,14 @@ export interface BacklinksRollup {
 	};
 }
 
+function constellationEndpoint(options: ConstellationOptions): string | false {
+	// Optional indexes stay optional in production. Isolation deliberately fails loudly
+	// for missing/disabled services rather than presenting unavailable data as empty.
+	return options.network?.isolated
+		? requiredEndpoint(options, 'constellation', options.constellation)
+		: endpoint(options, 'constellation', options.constellation);
+}
+
 function constellationParams(target: string, source: BacklinkSource): URLSearchParams {
 	const path = source.path.startsWith('.') ? source.path : `.${source.path}`;
 	return new URLSearchParams({ target, collection: source.collection, path });
@@ -592,12 +606,14 @@ export async function countBacklinks(
 	source: BacklinkSource,
 	options: ConstellationOptions = {}
 ): Promise<number | undefined> {
-	const base = options.constellation ?? DEFAULT_CONSTELLATION;
+	const base = constellationEndpoint(options);
+	if (base === false) return undefined;
 	try {
-		const r = await fetchMicrocosm(`${base}/links/count?${constellationParams(target, source)}`);
+		const r = await fetchMicrocosm(`${base}/links/count?${constellationParams(target, source)}`, options);
 		if (!r.ok) return undefined;
 		return ((await r.json()) as { total: number }).total;
 	} catch (e) {
+		if (options.network?.isolated) throw e;
 		console.error('[atproto-oauth/helper] countBacklinks failed:', e);
 		return undefined;
 	}
@@ -614,14 +630,16 @@ export async function countDistinctBacklinkers(
 	source: BacklinkSource,
 	options: ConstellationOptions = {}
 ): Promise<number | undefined> {
-	const base = options.constellation ?? DEFAULT_CONSTELLATION;
+	const base = constellationEndpoint(options);
+	if (base === false) return undefined;
 	try {
 		const r = await fetchMicrocosm(
-			`${base}/links/count/distinct-dids?${constellationParams(target, source)}`
+			`${base}/links/count/distinct-dids?${constellationParams(target, source)}`, options
 		);
 		if (!r.ok) return undefined;
 		return ((await r.json()) as { total: number }).total;
 	} catch (e) {
+		if (options.network?.isolated) throw e;
 		console.error('[atproto-oauth/helper] countDistinctBacklinkers failed:', e);
 		return undefined;
 	}
@@ -642,7 +660,8 @@ export async function listBacklinks(
 		cursor?: string;
 	} = {}
 ): Promise<BacklinksPage | undefined> {
-	const base = options.constellation ?? DEFAULT_CONSTELLATION;
+	const base = constellationEndpoint(options);
+	if (base === false) return undefined;
 	try {
 		const params = constellationParams(target, source);
 		if (options.did) params.set('did', options.did);
@@ -650,7 +669,7 @@ export async function listBacklinks(
 		if (options.reverse) params.set('reverse', 'true');
 		if (options.cursor) params.set('cursor', options.cursor);
 
-		const r = await fetchMicrocosm(`${base}/links?${params}`);
+		const r = await fetchMicrocosm(`${base}/links?${params}`, options);
 		if (!r.ok) return undefined;
 		const data = (await r.json()) as {
 			total: number;
@@ -663,6 +682,7 @@ export async function listBacklinks(
 			cursor: data.cursor ?? undefined
 		};
 	} catch (e) {
+		if (options.network?.isolated) throw e;
 		console.error('[atproto-oauth/helper] listBacklinks failed:', e);
 		return undefined;
 	}
@@ -677,13 +697,14 @@ export async function listDistinctBacklinkers(
 	source: BacklinkSource,
 	options: ConstellationOptions & { limit?: number; cursor?: string } = {}
 ): Promise<DistinctBacklinkersPage | undefined> {
-	const base = options.constellation ?? DEFAULT_CONSTELLATION;
+	const base = constellationEndpoint(options);
+	if (base === false) return undefined;
 	try {
 		const params = constellationParams(target, source);
 		if (options.limit !== undefined) params.set('limit', String(options.limit));
 		if (options.cursor) params.set('cursor', options.cursor);
 
-		const r = await fetchMicrocosm(`${base}/links/distinct-dids?${params}`);
+		const r = await fetchMicrocosm(`${base}/links/distinct-dids?${params}`, options);
 		if (!r.ok) return undefined;
 		const data = (await r.json()) as {
 			total: number;
@@ -696,6 +717,7 @@ export async function listDistinctBacklinkers(
 			cursor: data.cursor ?? undefined
 		};
 	} catch (e) {
+		if (options.network?.isolated) throw e;
 		console.error('[atproto-oauth/helper] listDistinctBacklinkers failed:', e);
 		return undefined;
 	}
@@ -710,12 +732,14 @@ export async function backlinksRollup(
 	target: string,
 	options: ConstellationOptions = {}
 ): Promise<BacklinksRollup | undefined> {
-	const base = options.constellation ?? DEFAULT_CONSTELLATION;
+	const base = constellationEndpoint(options);
+	if (base === false) return undefined;
 	try {
-		const r = await fetchMicrocosm(`${base}/links/all?target=${encodeURIComponent(target)}`);
+		const r = await fetchMicrocosm(`${base}/links/all?target=${encodeURIComponent(target)}`, options);
 		if (!r.ok) return undefined;
 		return ((await r.json()) as { links: BacklinksRollup }).links;
 	} catch (e) {
+		if (options.network?.isolated) throw e;
 		console.error('[atproto-oauth/helper] backlinksRollup failed:', e);
 		return undefined;
 	}

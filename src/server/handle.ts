@@ -3,6 +3,7 @@ import { building } from '$app/environment';
 import type { ResolvedConfig } from './config.js';
 import { restoreSession } from './session.js';
 import { createHandlers, type Handlers } from './handlers.js';
+import { withCookieHeaders } from './response-cookies.js';
 
 export function createHandle(config: ResolvedConfig): Handle {
 	const handlers = createHandlers(config);
@@ -11,18 +12,25 @@ export function createHandle(config: ResolvedConfig): Handle {
 		// Skip OAuth routing during prerender / build. The OAuth client needs
 		// real env wiring; constructing it during build would crash.
 		if (!building) {
-			const intercepted = matchHandler(event, config, handlers);
-			if (intercepted) {
-				const result = await intercepted;
-				return result as Response;
-			}
+			const response = await withCookieHeaders(event, async () => {
+				if (event.request.method === 'GET') {
+					const intercepted = matchHandler(event, config, handlers);
+					if (intercepted) return await intercepted as Response;
+				}
 
-			const restored = await restoreSession(event, config);
-			// Loose cast — the user's `App.Locals` declaration controls the surface.
-			const locals = event.locals as unknown as Record<string, unknown>;
-			locals.session = restored.session;
-			locals.client = restored.client;
-			locals.did = restored.did;
+				const restored = await restoreSession(event, config);
+				// Loose cast — the user's App.Locals declaration controls the surface.
+				const locals = event.locals as unknown as Record<string, unknown>;
+				locals.session = restored.session;
+				locals.client = restored.client;
+				locals.did = restored.did;
+				if (event.request.method === 'POST') {
+					const intercepted = matchHandler(event, config, handlers);
+					if (intercepted) return await intercepted as Response;
+				}
+				return undefined;
+			});
+			if (response) return response;
 		}
 
 		return resolve(event);
@@ -45,6 +53,7 @@ function matchHandler(
 	if (method === 'POST') {
 		if (path === config.loginPath) return handlers.login(event);
 		if (path === config.logoutPath) return handlers.logout(event);
+		if (path === config.permissionsPath) return handlers.permissions(event);
 	}
 	return undefined;
 }

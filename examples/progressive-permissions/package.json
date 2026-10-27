@@ -1,0 +1,24 @@
+{
+  "name": "oauth-progressive-permissions-diagnostic",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite dev --host 127.0.0.1 --strictPort",
+    "build": "vite build",
+    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json"
+  },
+  "dependencies": {
+    "@svelte-atproto/oauth": "file:../..",
+    "@atcute/atproto": "^4.0.4",
+    "@atcute/client": "^5.1.2",
+    "svelte": "^5.57.2"
+  },
+  "devDependencies": {
+    "@sveltejs/kit": "^2.70.3",
+    "@sveltejs/adapter-auto": "^7.0.1",
+    "@sveltejs/vite-plugin-svelte": "^7.3.1",
+    "svelte-check": "^4.7.6",
+    "typescript": "^6.0.3",
+    "vite": "^8.3.4"
+  }
+}

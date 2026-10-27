@@ -2,6 +2,8 @@
 // `user` — auth state lives on `event.locals` (server) and is forwarded to
 // page data per-route via your own `+page.server.ts` load functions.
 
+import type { Capability, Scope } from '../permissions/index.js';
+
 const DEFAULT_LOGIN_PATH = '/oauth/login';
 const DEFAULT_LOGOUT_PATH = '/oauth/logout';
 
@@ -10,11 +12,19 @@ export interface LoginOptions {
 	loginPath?: string;
 	/** Save the current page path so the OAuth callback redirects back here. Default `true`. */
 	saveReturnTo?: boolean;
+	/** Exact requested scope. Defaults to the server's configured scope. */
+	scope?: Scope;
+	returnTo?: string;
 }
 
-export interface SignupOptions {
-	loginPath?: string;
+export interface SignupOptions extends LoginOptions {}
+
+export interface PermissionOptions {
+	permissionsPath?: string;
 	saveReturnTo?: boolean;
+	returnTo?: string;
+	requirements?: readonly Capability[];
+	previousScope?: Scope;
 }
 
 export interface LogoutOptions {
@@ -41,8 +51,15 @@ function normalizeHandle(input: string): string {
 
 async function startOauthFlow(
 	path: string,
-	body: { handle?: string; signup?: boolean; returnTo?: string }
-): Promise<string> {
+	body: {
+		handle?: string;
+		signup?: boolean;
+		returnTo?: string;
+		scope?: Scope;
+		requirements?: readonly Capability[];
+		previousScope?: Scope;
+	}
+): Promise<string | null> {
 	const res = await fetch(path, {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json' },
@@ -52,8 +69,9 @@ async function startOauthFlow(
 		const err = (await res.json().catch(() => ({}))) as { message?: string; error?: string };
 		throw new Error(err.message ?? err.error ?? `Login failed (${res.status})`);
 	}
-	const data = (await res.json()) as { url?: string };
-	if (!data.url) throw new Error('Login response missing url');
+	const data = (await res.json()) as { url?: string | null };
+	if (data.url === null) return null;
+	if (typeof data.url !== 'string' || !data.url) throw new Error('Login response missing url');
 	return data.url;
 }
 
@@ -69,12 +87,13 @@ async function navigateAndAwait(url: string, abortMessage: string): Promise<neve
  * Start a login flow. Validates the handle/DID, POSTs to the lib's login
  * endpoint, then navigates the browser to the PDS authorize URL.
  */
-export async function login(handle: string, options: LoginOptions = {}): Promise<void> {
+export async function login(handle?: string, options: LoginOptions = {}): Promise<void> {
 	const path = options.loginPath ?? DEFAULT_LOGIN_PATH;
-	const normalized = normalizeHandle(handle);
-	const returnTo = options.saveReturnTo === false ? undefined : currentReturnTo();
-	const url = await startOauthFlow(path, { handle: normalized, returnTo });
-	await navigateAndAwait(url, 'user aborted the login request');
+	const normalized = handle === undefined ? undefined : normalizeHandle(handle);
+	const returnTo =
+		options.returnTo ?? (options.saveReturnTo === false ? undefined : currentReturnTo());
+	const url = await startOauthFlow(path, { handle: normalized, scope: options.scope, returnTo });
+	if (url) await navigateAndAwait(url, 'user aborted the login request');
 }
 
 /**
@@ -83,9 +102,26 @@ export async function login(handle: string, options: LoginOptions = {}): Promise
  */
 export async function signup(options: SignupOptions = {}): Promise<void> {
 	const path = options.loginPath ?? DEFAULT_LOGIN_PATH;
-	const returnTo = options.saveReturnTo === false ? undefined : currentReturnTo();
-	const url = await startOauthFlow(path, { signup: true, returnTo });
-	await navigateAndAwait(url, 'user aborted the signup request');
+	const returnTo =
+		options.returnTo ?? (options.saveReturnTo === false ? undefined : currentReturnTo());
+	const url = await startOauthFlow(path, { signup: true, scope: options.scope, returnTo });
+	if (url) await navigateAndAwait(url, 'user aborted the signup request');
+}
+
+/** Add permissions without dropping original request tokens. Returns immediately if already granted. */
+export async function requestPermissions(
+	scope: Scope,
+	options: PermissionOptions = {}
+): Promise<void> {
+	const returnTo =
+		options.returnTo ?? (options.saveReturnTo === false ? undefined : currentReturnTo());
+	const url = await startOauthFlow(options.permissionsPath ?? '/oauth/permissions', {
+		scope,
+		returnTo,
+		requirements: options.requirements,
+		previousScope: options.previousScope
+	});
+	if (url) await navigateAndAwait(url, 'user aborted the permission request');
 }
 
 /**

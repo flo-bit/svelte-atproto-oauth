@@ -3,37 +3,18 @@ import {
 	type ClientAssertionPrivateJwk,
 	type OAuthClientStores
 } from '@atcute/oauth-node-client';
-import {
-	CompositeDidDocumentResolver,
-	CompositeHandleResolver,
-	DohJsonHandleResolver,
-	LocalActorResolver,
-	PlcDidDocumentResolver,
-	WebDidDocumentResolver,
-	WellKnownHandleResolver
-} from '@atcute/identity-resolver';
+import { createActorResolver } from '../network/index.js';
 import type { ResolvedConfig } from './config.js';
+import { authorizationSessions, type AuthorizationState } from './authorization.js';
+import { clientRequestLock, type RequestLock } from './lock.js';
 
-function actorResolver(doh: string) {
-	return new LocalActorResolver({
-		handleResolver: new CompositeHandleResolver({
-			methods: {
-				dns: new DohJsonHandleResolver({ dohUrl: doh }),
-				http: new WellKnownHandleResolver()
-			}
-		}),
-		didDocumentResolver: new CompositeDidDocumentResolver({
-			methods: {
-				plc: new PlcDidDocumentResolver(),
-				web: new WebDidDocumentResolver()
-			}
-		})
-	});
-}
-
-export function createOAuthClient(config: ResolvedConfig): OAuthClient {
+export function createOAuthClient(
+	config: ResolvedConfig,
+	flow?: AuthorizationState | null,
+	requestLock: RequestLock = clientRequestLock(config)
+): OAuthClient {
 	const stores = {
-		sessions: config.resolveSessions(),
+		sessions: authorizationSessions(config.resolveSessions(), flow, requestLock),
 		states: config.resolveStates()
 	} as OAuthClientStores;
 
@@ -45,7 +26,9 @@ export function createOAuthClient(config: ResolvedConfig): OAuthClient {
 				redirect_uris: [`http://127.0.0.1:${config.devPort}${config.redirectPath}`],
 				scope: config.scope
 			},
-			actorResolver: actorResolver(config.doh),
+			actorResolver: createActorResolver(config.identity),
+			fetch: config.fetch,
+			requestLock,
 			stores
 		});
 	}
@@ -66,13 +49,15 @@ export function createOAuthClient(config: ResolvedConfig): OAuthClient {
 
 	return new OAuthClient({
 		metadata: {
-			client_id: `${config.origin}/oauth-client-metadata.json`,
+			client_id: `${config.origin}${config.metadataPath}`,
 			redirect_uris: [`${config.origin}${config.redirectPath}`],
 			scope: config.scope,
-			jwks_uri: `${config.origin}/oauth/jwks.json`
+			jwks_uri: `${config.origin}${config.jwksPath}`
 		},
 		keyset: [key],
-		actorResolver: actorResolver(config.doh),
+		actorResolver: createActorResolver(config.identity),
+		fetch: config.fetch,
+		requestLock,
 		stores
 	});
 }
