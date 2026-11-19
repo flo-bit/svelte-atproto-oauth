@@ -295,6 +295,8 @@ export function createAtprotoBrowserAuth(config: BrowserAuthConfig): AtprotoBrow
 		current = session;
 		lastError = authorizationError;
 		const agent = new OAuthUserAgent(session);
+		// Before the user store, so its subscribers see the matching account list.
+		syncAccounts();
 		_user.set({
 			agent,
 			client: new Client({ handler: agent }),
@@ -304,11 +306,11 @@ export function createAtprotoBrowserAuth(config: BrowserAuthConfig): AtprotoBrow
 			permissions: snapshot(session),
 			authorizationError
 		});
-		syncAccounts();
 	}
 	function clearSession(authorizationError: AuthorizationError | null = null) {
 		current = null;
 		lastError = authorizationError;
+		syncAccounts();
 		_user.set({
 			agent: null,
 			client: null,
@@ -318,7 +320,6 @@ export function createAtprotoBrowserAuth(config: BrowserAuthConfig): AtprotoBrow
 			permissions: emptyPermissions(),
 			authorizationError
 		});
-		syncAccounts();
 	}
 	async function resume(did: Did | null, authorizationError: AuthorizationError | null = null) {
 		if (!did) {
