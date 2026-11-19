@@ -243,9 +243,18 @@ export function createAtprotoBrowserAuth(config: BrowserAuthConfig): AtprotoBrow
 	/** Adopt a selection or sign-out made in another tab. Storage is the authority, not the event. */
 	function reconcile() {
 		return withLifecycleLock(async () => {
+			// Restoring may refresh a token: never before the egress guard has passed.
+			assertBrowserEgress();
 			const did = localStorage.getItem(STORAGE_KEY) as Did | null;
-			if (did === (current?.info.sub ?? null)) syncAccounts();
-			else await resume(did);
+			if (did !== (current?.info.sub ?? null)) return resume(did);
+			syncAccounts();
+			if (!did) return;
+			// Same account, but another tab may have reauthorized, upgraded or lost its session.
+			try {
+				await readPermissions();
+			} catch (e) {
+				if (e instanceof TokenRefreshError) await resume(did);
+			}
 		}).catch(() => {});
 	}
 	function listen() {
@@ -253,8 +262,15 @@ export function createAtprotoBrowserAuth(config: BrowserAuthConfig): AtprotoBrow
 		listening = true;
 		window.addEventListener('storage', (event) => {
 			if (event.storageArea && event.storageArea !== localStorage) return;
-			if (event.key === null || event.key === STORAGE_KEY) void reconcile();
-			else if (event.key.startsWith(sdkStorageName) && !get(_user).isInitializing) syncAccounts();
+			if (get(_user).isInitializing) return;
+			const did = current?.info.sub;
+			if (
+				event.key === null ||
+				event.key === STORAGE_KEY ||
+				(did && [`${sdkStorageName}:sessions:${did}`, historyKey(did)].includes(event.key))
+			)
+				void reconcile();
+			else if (event.key.startsWith(`${sdkStorageName}:sessions:`)) syncAccounts();
 		});
 		// Suspended tabs can miss events; check again when they come back.
 		window.addEventListener('visibilitychange', () => {
@@ -621,11 +637,15 @@ export function createAtprotoBrowserAuth(config: BrowserAuthConfig): AtprotoBrow
 	async function logout(options: { did?: string } = {}) {
 		return withLifecycleLock(async () => {
 			ensureConfigured();
-			// A queued callback (possibly in another tab) may have replaced current.
-			const active = (localStorage.getItem(STORAGE_KEY) as Did | null) ?? current?.info.sub ?? null;
+			// The shared selection is the authority, also when it is empty: this tab may still
+			// show an account that another tab moved away from, and that account stays retained.
+			// Signing out an account that is not active takes an explicit DID.
+			const active = localStorage.getItem(STORAGE_KEY) as Did | null;
 			const did = (options.did as Did | undefined) ?? active;
 			if (did) await revoke(did);
 			if (did === active) signedOut();
+			// This tab was behind: catch up with the selection instead of keeping a stale account.
+			else if ((current?.info.sub ?? null) !== active) await resume(active);
 			else syncAccounts();
 		});
 	}

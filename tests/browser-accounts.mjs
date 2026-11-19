@@ -3,16 +3,16 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { browserRuntime, browserSession, DID, OTHER_DID, POST } from './support/runtime.mjs';
 const { createAtprotoBrowserAuth, AccountSwitchError } = await import('../src/browser/index.ts');
-const { TokenRefreshError } = await import('./support/browser-sdk.mjs');
+const { createAtprotoNetwork } = await import('../src/network/index.ts');
 const config = { origin: 'https://client.example.com', scope: ['atproto', POST] };
 const SELECTED = 'atproto-current-login';
 
 // Scripted SDK and web storage. Each "tab" is an auth instance with its own listeners
 // over shared storage; not a real-browser multi-tab test.
-function tab(t) {
+function tab(t, options = config, lock = 'svelte-atproto:lifecycle') {
 	const listeners = [];
 	// Listeners register lazily; route registrations made by this tab to its own list.
-	const auth = createAtprotoBrowserAuth(config);
+	const auth = createAtprotoBrowserAuth(options);
 	let user, accounts;
 	auth.user.subscribe((s) => (user = s));
 	auth.accounts.subscribe((s) => (accounts = s));
@@ -30,7 +30,7 @@ function tab(t) {
 		async storage(key) {
 			for (const l of listeners) if (l.type === 'storage') l.fn({ key, storageArea: localStorage });
 			// Reconciliation is queued behind the lifecycle lock.
-			await navigator.locks.request('svelte-atproto:lifecycle', async () => {});
+			await navigator.locks.request(lock, async () => {});
 			await new Promise((resolve) => setImmediate(resolve));
 		}
 	};
@@ -214,4 +214,111 @@ test('a legacy single-account browser lists its one session', async () => {
 	localStorage.setItem(SELECTED, DID);
 	await ctx.auth.init();
 	assert.deepEqual(list(ctx), [`${DID}*`]);
+});
+
+test('other tabs pick up new permissions for the account they already show', async () => {
+	const a = setup();
+	await login(a);
+	const b = tab(a.t);
+	await b.run((auth) => auth.init());
+	const client = b.user().client;
+	assert.deepEqual(b.user().permissions.grantedScope, ['atproto']);
+
+	await a.auth.requestPermissions(POST);
+	a.t.next = browserSession(`atproto ${POST}`);
+	a.t.next.token.access = 'TEST-ONLY-upgraded';
+	window.location.hash = '#code=SCRIPTED&state=SCRIPTED&iss=https://as.example.com';
+	await a.auth.init();
+	assert.deepEqual(a.user().permissions.grantedScope, ['atproto', POST]);
+
+	await b.storage(`atcute-oauth:sessions:${DID}`);
+	assert.equal(b.user().did, DID);
+	assert.deepEqual(b.user().permissions.grantedScope, ['atproto', POST]);
+	assert.deepEqual(b.user().permissions.requestedScope, ['atproto', POST]);
+	assert.notEqual(b.user().client, client, 'requests use the replacement session');
+	assert.equal(b.user().agent.session.token.access, 'TEST-ONLY-upgraded');
+
+	// The session disappearing elsewhere without a selection change signs this tab out too.
+	a.t.sessions.delete(DID);
+	await b.storage(`atcute-oauth:sessions:${DID}`);
+	assert.equal(b.user().isLoggedIn, false);
+});
+test('a tab that is behind cannot sign out an account that is no longer active', async () => {
+	const a = setup();
+	await login(a);
+	await login(a, OTHER_DID);
+	await a.auth.switchAccount(DID);
+	const b = tab(a.t);
+	await b.run((auth) => auth.init());
+	await b.auth.switchAccount(OTHER_DID);
+	await b.auth.logout();
+	assert.equal(localStorage.getItem(SELECTED), null);
+	assert.equal(a.user().did, DID, 'this tab has not caught up');
+
+	await a.auth.logout();
+	assert.deepEqual(a.t.revoked, [OTHER_DID]);
+	assert.equal(a.t.sessions.has(DID), true);
+	assert.equal(a.user().isLoggedIn, false, 'it catches up instead');
+	assert.deepEqual(list(a), [DID]);
+	// An explicit DID still signs out an inactive account.
+	await a.auth.logout({ did: DID });
+	assert.deepEqual(a.t.revoked, [OTHER_DID, DID]);
+	assert.deepEqual(a.accounts(), []);
+});
+test('a tab that is behind signs out the selected account, not the one it shows', async () => {
+	const a = setup();
+	await login(a);
+	await login(a, OTHER_DID);
+	const b = tab(a.t);
+	await b.run((auth) => auth.init());
+	await b.auth.switchAccount(DID);
+	assert.equal(a.user().did, OTHER_DID);
+	await a.auth.logout();
+	assert.deepEqual(a.t.revoked, [DID]);
+	assert.equal(a.t.sessions.has(OTHER_DID), true);
+	assert.equal(a.user().isLoggedIn, false);
+});
+test('cross-tab restoration checks isolated-network egress before touching a session', async () => {
+	const t = browserRuntime();
+	const network = createAtprotoNetwork({
+		mode: 'isolated',
+		namespace: 'sandbox',
+		allowedOrigins: ['https://pds.example.com', 'https://as.example.com'],
+		slingshot: false,
+		actorResolver: { resolve: async () => ({ did: DID, handle: 'test.example.com', pds: 'https://pds.example.com' }) }
+	});
+	let open = true;
+	const selected = network.cacheKey(SELECTED);
+	const ctx = tab(
+		t,
+		{ ...config, network, assertBrowserEgress: () => { if (!open) throw new Error('egress unprotected'); } },
+		network.cacheKey('svelte-atproto:lifecycle')
+	);
+	t.sessions.set(DID, browserSession());
+	t.sessions.set(OTHER_DID, browserSession('atproto', OTHER_DID));
+	localStorage.setItem(selected, DID);
+	await ctx.run((auth) => auth.init());
+	assert.equal(ctx.user().did, DID);
+
+	let reads = 0;
+	Object.defineProperty(t, 'resumeError', { get: () => void reads++ });
+	open = false;
+	localStorage.setItem(selected, OTHER_DID);
+	await ctx.storage(selected);
+	localStorage.setItem(selected, DID);
+	await ctx.storage(`${network.cacheKey('atcute-oauth')}:sessions:${DID}`);
+	localStorage.setItem(selected, OTHER_DID);
+	globalThis.document = { visibilityState: 'visible' };
+	try {
+		await ctx.storage(null);
+	} finally {
+		delete globalThis.document;
+	}
+	assert.equal(reads, 0, 'no session is read, so no refresh can be sent');
+	assert.equal(ctx.user().did, DID);
+
+	open = true;
+	await ctx.storage(selected);
+	assert.equal(ctx.user().did, OTHER_DID);
+	assert.ok(reads > 0);
 });
