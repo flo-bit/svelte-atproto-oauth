@@ -1,5 +1,11 @@
 # @svelte-atproto/oauth
 
+## 0.5.0
+
+### Minor Changes
+
+- 09bd049: Browser OAuth: retain multiple accounts and switch between them. Adds an `accounts` store, `switchAccount(did)`, `logout({ did })`, `logoutAll()` and `AccountSwitchError`; the active account now stays in sync across tabs.
+
 ## 0.4.1
 
 ### Patch Changes
