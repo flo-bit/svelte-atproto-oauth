@@ -32,6 +32,9 @@ export async function getSession(did, options) {
 export function deleteStoredSession(did) {
 	globalThis.authTest.sessions.delete(did);
 }
+export function listStoredSessions() {
+	return [...globalThis.authTest.sessions.keys()];
+}
 export class OAuthUserAgent {
 	constructor(session) {
 		this.session = session;

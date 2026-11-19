@@ -2,7 +2,7 @@ import './support/register.mjs';
 import { registerHooks } from 'node:module';
 import assert from 'node:assert/strict';
 import { test, afterEach } from 'node:test';
-import { browserRuntime, nodeRuntime, DID, POST } from './support/runtime.mjs';
+import { browserRuntime, nodeRuntime, DID, OTHER_DID, POST } from './support/runtime.mjs';
 
 // Exercise the package adapter with the actual installed browser SDK. Only the
 // browser primitives, identity lookup, and authorization-server transport are scripted.
@@ -104,4 +104,34 @@ test('real browser SDK rejects an old upgrade before exchange after same-DID log
 	assert.equal((await sdk.getSession(DID)).token.access, replacement.token.access);
 	assert.equal(ctx.server.requests.filter(request => request.path === '/token').length, exchanges);
 	await assert.rejects(sdk.finalizeAuthorization(new URLSearchParams(old.hash.slice(1))), /unknown state/);
+});
+
+test('real browser SDK retains two accounts; switching and targeted logout leave the other usable', async () => {
+	const ctx = setup();
+	let accounts;
+	ctx.auth.accounts.subscribe(value => { accounts = value; });
+	await login(ctx);
+	// The scripted resolver always resolves to DID; the authorization server returns the other account.
+	await ctx.auth.login('other.example.com', { scope: 'atproto' });
+	const state = ctx.server.requests.findLast(request => request.path === '/par').body.get('state');
+	ctx.server.tokens.set(state, { scope: 'atproto', did: OTHER_DID });
+	window.location.hash = `#code=${state}&state=${state}&iss=https://as.example.com`;
+	await ctx.auth.init();
+	assert.equal(ctx.user().did, OTHER_DID);
+	assert.deepEqual(sdk.listStoredSessions().sort(), [DID, OTHER_DID].sort());
+	assert.deepEqual(accounts.find(account => account.active)?.did, OTHER_DID);
+
+	const tokenRequests = () => ctx.server.requests.filter(request => request.path === '/token').length;
+	const before = tokenRequests();
+	await ctx.auth.switchAccount(DID);
+	assert.equal(ctx.user().did, DID);
+	assert.equal(tokenRequests(), before, 'a fresh retained session is restored without a token request');
+	assert.equal(localStorage.getItem('atproto-current-login'), DID);
+
+	await ctx.auth.logout({ did: OTHER_DID });
+	assert.equal(ctx.user().did, DID);
+	assert.deepEqual(sdk.listStoredSessions(), [DID]);
+	assert.deepEqual(accounts, [{ did: DID, active: true }]);
+	await assert.rejects(ctx.auth.switchAccount(OTHER_DID), /reauthorization_required/);
+	assert.equal(ctx.user().did, DID);
 });

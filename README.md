@@ -424,6 +424,35 @@ In dev, the lib uses a loopback `client_id` automatically — no public URL or m
 
 `atproto.user` is a `svelte/store` `Readable` so components consume it via `$user.x` (auto-subscription).
 
+### Multiple accounts
+
+Signing in as another account keeps the earlier ones signed in. `atproto.user` stays the active account; `atproto.accounts` lists every account with a retained session.
+
+```svelte
+<script>
+	import { atproto } from '$lib/atproto';
+	const { user, accounts, switchAccount, login, logout, logoutAll } = atproto;
+</script>
+
+{#each $accounts as account (account.did)}
+	<button disabled={account.active} onclick={() => switchAccount(account.did)}>{account.did}</button>
+	<button onclick={() => logout({ did: account.did })}>Sign out</button>
+{/each}
+<button onclick={() => login('bob.example.com')}>Add account</button>
+<button onclick={logoutAll}>Sign out of all accounts</button>
+```
+
+- `switchAccount(did)` restores the retained session; it does not revoke anything or repeat authorization. On failure it throws `AccountSwitchError` and the previous account stays active: `reason` is `'reauthorization_required'` (the session is gone; call `login(did)`) or `'unavailable'` (network/storage failure; the session is kept, retry later).
+- `logout()` signs out the account selected in shared storage and leaves no account active; it never selects another one. A tab that has not caught up with a change made elsewhere follows that selection, so it cannot sign out the account it still shows by accident; pass a DID to sign out a specific account. Call `switchAccount` afterwards if your app should fall back to a remaining account. `logout({ did })` signs out one account, active or not. `logoutAll()` covers every account in this browser, not other devices.
+- The active account is shared by all tabs of the origin. Other tabs follow a switch, sign-out, reauthorization or permission upgrade through `storage` events and re-check when they become visible; `user` (including `permissions` and `client`) and `accounts` update there too. With an isolated network profile, `assertBrowserEgress` runs before any of this restores a session. Frozen tabs catch up late, so treat this as eventual.
+- `accounts` holds DIDs only and reading it never refreshes a token. Keep handles and avatars in your app, keyed by DID. An entry means a session is stored, not that it still works.
+- A `client` belongs to the account it was created for and does not start sending as the new account after a switch. Read `$user.client` when you make a request, key private caches and drafts by DID, and drop late responses for a previous account.
+- Permissions, request history and pending upgrades remain per account. An upgrade callback that returns after another account was selected is rejected with `identity_mismatch` and changes neither account.
+
+The browser SDK stores a callback's session before returning it. If a login for a specific DID comes back as a different, already retained account, that account's stored session has been replaced before the mismatch can be checked; it is signed out (`identity_mismatch`) and must sign in again. Other accounts are unaffected.
+
+Multi-account support is browser-only for now; server OAuth still has one account per browser session.
+
 ## Bsky helpers (`/bsky`)
 
 Opt-in. Anyone on a custom appview never imports this and pays nothing.

@@ -6,6 +6,7 @@ import {
 	OAuthUserAgent,
 	getSession,
 	deleteStoredSession,
+	listStoredSessions,
 	TokenRefreshError,
 	type Session
 } from '@atcute/oauth-browser-client';
@@ -58,6 +59,26 @@ export interface UserState {
 	permissions: PermissionSnapshot;
 	authorizationError: AuthorizationError | null;
 }
+/** An account whose session is retained in this browser. Not proof the session still works. */
+export interface BrowserAccount {
+	did: Did;
+	active: boolean;
+}
+/**
+ * `reauthorization_required`: the retained session is gone or revoked; log in again.
+ * `unavailable`: a network/storage failure; the session is kept and switching can be retried.
+ * The previously active account stays active in both cases.
+ */
+export class AccountSwitchError extends Error {
+	constructor(
+		readonly did: Did,
+		readonly reason: 'reauthorization_required' | 'unavailable',
+		options?: ErrorOptions
+	) {
+		super(`Could not switch account: ${reason}`, options);
+		this.name = 'AccountSwitchError';
+	}
+}
 export interface ClientMetadata {
 	client_id: string;
 	redirect_uris: string[];
@@ -79,11 +100,18 @@ export interface BrowserPermissionOptions {
 }
 export interface AtprotoBrowserAuth {
 	user: Readable<UserState>;
+	/** Accounts with a retained session, kept in sync across tabs. */
+	accounts: Readable<BrowserAccount[]>;
 	metadata: ClientMetadata;
 	init(): Promise<void>;
 	login(handleOrDid?: string, options?: BrowserLoginOptions): Promise<void>;
 	signup(options?: BrowserLoginOptions): Promise<void>;
-	logout(): Promise<void>;
+	/** Make a retained account active, in every tab. Other accounts stay signed in. */
+	switchAccount(did: string): Promise<void>;
+	/** Sign out the active account, or a specific retained one. Never activates another account. */
+	logout(options?: { did?: string }): Promise<void>;
+	/** Sign out every account retained in this browser. */
+	logoutAll(): Promise<void>;
 	getPermissions(options?: { refresh?: boolean }): Promise<PermissionSnapshot>;
 	can(capability: Capability, options?: { refresh?: boolean }): Promise<boolean>;
 	requestPermissions(scope: Scope, options?: BrowserPermissionOptions): Promise<void>;
@@ -168,7 +196,10 @@ export function createAtprotoBrowserAuth(config: BrowserAuthConfig): AtprotoBrow
 		permissions: emptyPermissions(),
 		authorizationError: null
 	});
+	const _accounts = writable<BrowserAccount[]>([]);
+	const sdkStorageName = config.network ? storageKey('atcute-oauth') : 'atcute-oauth';
 	let configured = false;
+	let listening = false;
 	let current: Session | null = null;
 	let lastError: AuthorizationError | null = null;
 
@@ -186,9 +217,65 @@ export function createAtprotoBrowserAuth(config: BrowserAuthConfig): AtprotoBrow
 				redirect_uri: redirectUri
 			},
 			identityResolver,
-			storageName: config.network ? storageKey('atcute-oauth') : undefined
+			storageName: config.network ? sdkStorageName : undefined
 		});
 		configured = true;
+		// After the SDK's own storage listener, so its view is current when ours runs.
+		listen();
+	}
+	/** Rebuild the account list from the SDK's stored sessions and the shared selection. */
+	function syncAccounts() {
+		let dids: Did[] = [];
+		try {
+			if (configured) dids = listStoredSessions();
+		} catch {
+			/* Unreadable storage: list nothing rather than guess. */
+		}
+		const active = localStorage.getItem(STORAGE_KEY);
+		const next = dids.map((did) => ({ did, active: did === active }));
+		if (JSON.stringify(next) !== JSON.stringify(get(_accounts))) _accounts.set(next);
+	}
+	function forget(did: Did) {
+		deleteStoredSession(did);
+		localStorage.removeItem(historyKey(did));
+		localStorage.removeItem(sessionKey(did));
+	}
+	/** Adopt a selection or sign-out made in another tab. Storage is the authority, not the event. */
+	function reconcile() {
+		return withLifecycleLock(async () => {
+			// Restoring may refresh a token: never before the egress guard has passed.
+			assertBrowserEgress();
+			const did = localStorage.getItem(STORAGE_KEY) as Did | null;
+			if (did !== (current?.info.sub ?? null)) return resume(did);
+			syncAccounts();
+			if (!did) return;
+			// Same account, but another tab may have reauthorized, upgraded or lost its session.
+			try {
+				await readPermissions();
+			} catch (e) {
+				if (e instanceof TokenRefreshError) await resume(did);
+			}
+		}).catch(() => {});
+	}
+	function listen() {
+		if (listening || typeof window.addEventListener !== 'function') return;
+		listening = true;
+		window.addEventListener('storage', (event) => {
+			if (event.storageArea && event.storageArea !== localStorage) return;
+			if (get(_user).isInitializing) return;
+			const did = current?.info.sub;
+			if (
+				event.key === null ||
+				event.key === STORAGE_KEY ||
+				(did && [`${sdkStorageName}:sessions:${did}`, historyKey(did)].includes(event.key))
+			)
+				void reconcile();
+			else if (event.key.startsWith(`${sdkStorageName}:sessions:`)) syncAccounts();
+		});
+		// Suspended tabs can miss events; check again when they come back.
+		window.addEventListener('visibilitychange', () => {
+			if (globalThis.document?.visibilityState === 'visible') void reconcile();
+		});
 	}
 	function readHistory(did: string): string[] | null {
 		const value = readJson(localStorage, historyKey(did)) as {
@@ -224,6 +311,8 @@ export function createAtprotoBrowserAuth(config: BrowserAuthConfig): AtprotoBrow
 		current = session;
 		lastError = authorizationError;
 		const agent = new OAuthUserAgent(session);
+		// Before the user store, so its subscribers see the matching account list.
+		syncAccounts();
 		_user.set({
 			agent,
 			client: new Client({ handler: agent }),
@@ -237,6 +326,7 @@ export function createAtprotoBrowserAuth(config: BrowserAuthConfig): AtprotoBrow
 	function clearSession(authorizationError: AuthorizationError | null = null) {
 		current = null;
 		lastError = authorizationError;
+		syncAccounts();
 		_user.set({
 			agent: null,
 			client: null,
@@ -259,9 +349,7 @@ export function createAtprotoBrowserAuth(config: BrowserAuthConfig): AtprotoBrow
 			if (e instanceof TokenRefreshError) {
 				// localStorage is shared: another tab may have switched to a different account meanwhile.
 				if (localStorage.getItem(STORAGE_KEY) === did) localStorage.removeItem(STORAGE_KEY);
-				deleteStoredSession(did);
-				localStorage.removeItem(historyKey(did));
-				localStorage.removeItem(sessionKey(did));
+				forget(did);
 			}
 			clearSession(authorizationError ?? 'failed');
 		}
@@ -507,34 +595,80 @@ export function createAtprotoBrowserAuth(config: BrowserAuthConfig): AtprotoBrow
 			}
 		);
 	}
-	async function logout() {
+	async function switchAccount(input: string) {
+		const did = input as Did;
 		return withLifecycleLock(async () => {
 			ensureConfigured();
-			// A queued callback (possibly in another tab) may have replaced current.
-			const did = (localStorage.getItem(STORAGE_KEY) as Did | null) ?? current?.info.sub;
-			if (did) {
-				try {
-					const session = await getSession(did, { allowStale: true });
-					await new OAuthUserAgent(session).signOut();
-				} catch {
-					deleteStoredSession(did);
-				}
-				localStorage.removeItem(historyKey(did));
-				localStorage.removeItem(sessionKey(did));
+			if (current?.info.sub === did && localStorage.getItem(STORAGE_KEY) === did) return;
+			let session: Session;
+			try {
+				session = await getSession(did);
+			} catch (e) {
+				// The active account is untouched either way.
+				if (!(e instanceof TokenRefreshError))
+					throw new AccountSwitchError(did, 'unavailable', { cause: e });
+				forget(did);
+				syncAccounts();
+				throw new AccountSwitchError(did, 'reauthorization_required', { cause: e });
 			}
-			localStorage.removeItem(STORAGE_KEY);
-			sessionStorage.removeItem(pendingKey);
+			localStorage.setItem(STORAGE_KEY, did);
 			sessionStorage.removeItem(outcomeKey);
-			clearSession();
+			applySession(session, null);
+		});
+	}
+	/** Local invalidation always completes; remote revocation is best effort. */
+	async function revoke(did: Did) {
+		try {
+			const session = await getSession(did, { allowStale: true });
+			await new OAuthUserAgent(session).signOut();
+		} catch {
+			deleteStoredSession(did);
+		}
+		// Also invalidates this account's pending permission upgrades.
+		localStorage.removeItem(historyKey(did));
+		localStorage.removeItem(sessionKey(did));
+	}
+	function signedOut() {
+		localStorage.removeItem(STORAGE_KEY);
+		sessionStorage.removeItem(pendingKey);
+		sessionStorage.removeItem(outcomeKey);
+		clearSession();
+	}
+	async function logout(options: { did?: string } = {}) {
+		return withLifecycleLock(async () => {
+			ensureConfigured();
+			// The shared selection is the authority, also when it is empty: this tab may still
+			// show an account that another tab moved away from, and that account stays retained.
+			// Signing out an account that is not active takes an explicit DID.
+			const active = localStorage.getItem(STORAGE_KEY) as Did | null;
+			const did = (options.did as Did | undefined) ?? active;
+			if (did) await revoke(did);
+			if (did === active) signedOut();
+			// This tab was behind: catch up with the selection instead of keeping a stale account.
+			else if ((current?.info.sub ?? null) !== active) await resume(active);
+			else syncAccounts();
+		});
+	}
+	async function logoutAll() {
+		return withLifecycleLock(async () => {
+			ensureConfigured();
+			const dids = new Set<Did>(listStoredSessions());
+			const active = (localStorage.getItem(STORAGE_KEY) as Did | null) ?? current?.info.sub;
+			if (active) dids.add(active);
+			for (const did of dids) await revoke(did);
+			signedOut();
 		});
 	}
 	return {
 		user: { subscribe: _user.subscribe },
+		accounts: { subscribe: _accounts.subscribe },
 		metadata,
 		init,
 		login,
 		signup,
+		switchAccount,
 		logout,
+		logoutAll,
 		getPermissions,
 		can,
 		requestPermissions
